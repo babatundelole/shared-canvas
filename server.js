@@ -7,14 +7,24 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
 let drawHistory = [];
-let imageStore = [];
+let mediaStore = []; // Stores both images and video elements
+const connectedUsers = {}; // Stores user details: { userId: { color, x, y, name } }
+
+function getRandomColor() {
+  const letters = '0123456789ABCDEF';
+  let color = '#';
+  for (let i = 0; i < 6; i++) {
+    color += letters[Math.floor(Math.random() * 16)];
+  }
+  return color;
+}
 
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
     <html>
     <head>
-      <title>Shared Canvas</title>
+      <title>Shared Canvas with Video</title>
       <style>
         body { margin: 0; background: #111; overflow: hidden; font-family: sans-serif; transition: background 0.3s; }
         body.theme-light { background: #f4f4f9; }
@@ -25,8 +35,30 @@ app.get('/', (req, res) => {
           background-size: 20px 20px;
         }
 
-        canvas { display: block; position: absolute; top: 0; left: 0; z-index: 2; }
-        
+        canvas { display: block; position: absolute; top: 0; left: 0; }
+        #mainCanvas { z-index: 2; }
+        #cursorCanvas { z-index: 3; pointer-events: none; }
+        #videoOverlayContainer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; }
+
+        .canvas-video-wrapper {
+          position: absolute;
+          transform-origin: center center;
+          pointer-events: auto;
+          box-sizing: border-box;
+        }
+
+        .canvas-video-wrapper video, .canvas-video-wrapper iframe {
+          width: 100%;
+          height: 100%;
+          border: none;
+          display: block;
+          object-fit: cover;
+        }
+
+        .canvas-video-wrapper.selected {
+          outline: 2px solid #00ffcc;
+        }
+
         #toolbar {
           position: fixed; top: 15px; left: 15px; z-index: 10;
           background: rgba(0,0,0,0.85); padding: 10px 14px;
@@ -35,6 +67,10 @@ app.get('/', (req, res) => {
           user-select: none; flex-wrap: wrap;
         }
         #status { font-weight: bold; font-size: 11px; color: #00ff00; margin-right: 5px; }
+        #userBadge { 
+          background: #222; border: 1px solid #444; padding: 3px 8px; 
+          border-radius: 12px; font-weight: bold; font-size: 11px; color: #00ffcc; 
+        }
         
         input[type="color"] {
           border: none; width: 26px; height: 26px; border-radius: 50%;
@@ -49,12 +85,12 @@ app.get('/', (req, res) => {
         button:hover, label.btn:hover, select:hover { background: #444; }
         button.active { background: #e74c3c; border-color: #ff6b6b; }
         
-        #deleteImgBtn {
+        #deleteMediaBtn {
           background: #c0392b;
           border-color: #e74c3c;
           display: none;
         }
-        #deleteImgBtn:hover { background: #e74c3c; }
+        #deleteMediaBtn:hover { background: #e74c3c; }
 
         input[type="file"] { display: none; }
 
@@ -64,6 +100,7 @@ app.get('/', (req, res) => {
     <body>
       <div id="toolbar">
         <span id="status">Connecting...</span>
+        <span id="userBadge">👥 1 Online</span>
 
         <div class="control-group">
           <input type="color" id="colorPicker" value="#00ffcc">
@@ -88,16 +125,26 @@ app.get('/', (req, res) => {
 
         <label for="imgUpload" class="btn">Add Image</label>
         <input type="file" id="imgUpload" accept="image/*">
-        
-        <button id="deleteImgBtn">Delete Image</button>
+
+        <button id="addVideoBtn">Add Video</button>
+        <input type="file" id="videoUpload" accept="video/*">
+
+        <button id="deleteMediaBtn">Delete Selected</button>
       </div>
 
+      <div id="videoOverlayContainer"></div>
       <canvas id="mainCanvas"></canvas>
+      <canvas id="cursorCanvas"></canvas>
 
       <script>
         const status = document.getElementById('status');
+        const userBadge = document.getElementById('userBadge');
         const mainCanvas = document.getElementById('mainCanvas');
         const mainCtx = mainCanvas.getContext('2d');
+        const cursorCanvas = document.getElementById('cursorCanvas');
+        const cursorCtx = cursorCanvas.getContext('2d');
+        const videoContainer = document.getElementById('videoOverlayContainer');
+
         const colorPicker = document.getElementById('colorPicker');
         const brushSize = document.getElementById('brushSize');
         const eraseBtn = document.getElementById('eraseBtn');
@@ -105,10 +152,20 @@ app.get('/', (req, res) => {
         const redoBtn = document.getElementById('redoBtn');
         const bgSelect = document.getElementById('bgSelect');
         const imgUpload = document.getElementById('imgUpload');
-        const deleteImgBtn = document.getElementById('deleteImgBtn');
+        const videoUpload = document.getElementById('videoUpload');
+        const addVideoBtn = document.getElementById('addVideoBtn');
+        const deleteMediaBtn = document.getElementById('deleteMediaBtn');
 
-        mainCanvas.width = window.innerWidth;
-        mainCanvas.height = window.innerHeight;
+        function resizeCanvases() {
+          mainCanvas.width = window.innerWidth;
+          mainCanvas.height = window.innerHeight;
+          cursorCanvas.width = window.innerWidth;
+          cursorCanvas.height = window.innerHeight;
+          requestRender();
+          renderCursors();
+        }
+
+        window.addEventListener('resize', resizeCanvases);
 
         let myUserId = null;
         let isEraserMode = false;
@@ -120,9 +177,10 @@ app.get('/', (req, res) => {
         let currentStrokeId = null;
 
         const userLayers = {};
+        let remoteCursors = {};
         
-        let imageObjects = [];
-        let selectedImg = null;
+        let mediaObjects = []; // Both image and video data objects
+        let selectedMedia = null;
         let dragMode = null;
         let isDragging = false;
         let dragOffset = { x: 0, y: 0 };
@@ -131,6 +189,7 @@ app.get('/', (req, res) => {
 
         let renderScheduled = false;
         let lastNetworkSend = 0;
+        let lastCursorSend = 0;
 
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
         const socket = new WebSocket(\`\${protocol}//\${location.host}\`);
@@ -164,15 +223,15 @@ app.get('/', (req, res) => {
         }
 
         function updateDeleteBtnVisibility() {
-          deleteImgBtn.style.display = (selectedImg && selectedImg.ownerId === myUserId) ? 'inline-block' : 'none';
+          deleteMediaBtn.style.display = (selectedMedia && selectedMedia.ownerId === myUserId) ? 'inline-block' : 'none';
         }
 
         function flattenLayersToMain() {
           renderScheduled = false;
           mainCtx.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
           
-          imageObjects.forEach(obj => {
-            if (obj.imgElement && obj.imgElement.complete) {
+          mediaObjects.forEach(obj => {
+            if (obj.mediaType === 'image' && obj.imgElement && obj.imgElement.complete) {
               mainCtx.save();
               const cx = obj.x + obj.w / 2;
               const cy = obj.y + obj.h / 2;
@@ -181,31 +240,131 @@ app.get('/', (req, res) => {
 
               mainCtx.drawImage(obj.imgElement, -obj.w / 2, -obj.h / 2, obj.w, obj.h);
 
-              if (obj === selectedImg && obj.ownerId === myUserId) {
-                mainCtx.strokeStyle = '#00ffcc';
-                mainCtx.lineWidth = 2;
-                mainCtx.strokeRect(-obj.w / 2, -obj.h / 2, obj.w, obj.h);
-
-                // Resize handle
-                mainCtx.fillStyle = '#00ffcc';
-                mainCtx.fillRect(obj.w / 2 - HANDLE_SIZE, obj.h / 2 - HANDLE_SIZE, HANDLE_SIZE, HANDLE_SIZE);
-
-                // Rotate handle
-                mainCtx.beginPath();
-                mainCtx.moveTo(0, -obj.h / 2);
-                mainCtx.lineTo(0, -obj.h / 2 - ROTATE_HANDLE_OFFSET);
-                mainCtx.stroke();
-
-                mainCtx.beginPath();
-                mainCtx.arc(0, -obj.h / 2 - ROTATE_HANDLE_OFFSET, 6, 0, Math.PI * 2);
-                mainCtx.fill();
+              if (obj === selectedMedia && obj.ownerId === myUserId) {
+                drawSelectionControls(obj);
               }
               mainCtx.restore();
+            } else if (obj.mediaType === 'video') {
+              updateVideoDOMElement(obj);
             }
           });
 
           for (const uid in userLayers) {
             mainCtx.drawImage(userLayers[uid].canvas, 0, 0);
+          }
+        }
+
+        function drawSelectionControls(obj) {
+          mainCtx.strokeStyle = '#00ffcc';
+          mainCtx.lineWidth = 2;
+          mainCtx.strokeRect(-obj.w / 2, -obj.h / 2, obj.w, obj.h);
+
+          // Resize handle
+          mainCtx.fillStyle = '#00ffcc';
+          mainCtx.fillRect(obj.w / 2 - HANDLE_SIZE, obj.h / 2 - HANDLE_SIZE, HANDLE_SIZE, HANDLE_SIZE);
+
+          // Rotate handle
+          mainCtx.beginPath();
+          mainCtx.moveTo(0, -obj.h / 2);
+          mainCtx.lineTo(0, -obj.h / 2 - ROTATE_HANDLE_OFFSET);
+          mainCtx.stroke();
+
+          mainCtx.beginPath();
+          mainCtx.arc(0, -obj.h / 2 - ROTATE_HANDLE_OFFSET, 6, 0, Math.PI * 2);
+          mainCtx.fill();
+        }
+
+        function updateVideoDOMElement(obj) {
+          let wrapper = document.getElementById('video_wrapper_' + obj.id);
+          if (!wrapper) {
+            wrapper = document.createElement('div');
+            wrapper.id = 'video_wrapper_' + obj.id;
+            wrapper.className = 'canvas-video-wrapper';
+
+            if (obj.isEmbed) {
+              const iframe = document.createElement('iframe');
+              iframe.src = obj.src;
+              iframe.allow = "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture";
+              iframe.allowFullscreen = true;
+              wrapper.appendChild(iframe);
+            } else {
+              const video = document.createElement('video');
+              video.src = obj.src;
+              video.controls = true;
+              video.autoplay = false;
+              video.muted = false;
+
+              video.onplay = () => syncVideoState(obj.id, 'play', video.currentTime);
+              video.onpause = () => syncVideoState(obj.id, 'pause', video.currentTime);
+              video.onseeked = () => syncVideoState(obj.id, 'seek', video.currentTime);
+
+              wrapper.appendChild(video);
+            }
+
+            videoContainer.appendChild(wrapper);
+          }
+
+          wrapper.style.left = obj.x + 'px';
+          wrapper.style.top = obj.y + 'px';
+          wrapper.style.width = obj.w + 'px';
+          wrapper.style.height = obj.h + 'px';
+          wrapper.style.transform = \`rotate(\${obj.angle || 0}rad)\`;
+
+          if (obj === selectedMedia && obj.ownerId === myUserId) {
+            wrapper.classList.add('selected');
+          } else {
+            wrapper.classList.remove('selected');
+          }
+        }
+
+        function syncVideoState(id, action, time) {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({
+              type: 'video_control',
+              id,
+              action,
+              time
+            }));
+          }
+        }
+
+        function renderCursors() {
+          cursorCtx.clearRect(0, 0, cursorCanvas.width, cursorCanvas.height);
+
+          for (const uid in remoteCursors) {
+            if (uid === myUserId) continue;
+            const cursor = remoteCursors[uid];
+            if (cursor.x === undefined || cursor.y === undefined) continue;
+
+            cursorCtx.save();
+            cursorCtx.translate(cursor.x, cursor.y);
+
+            cursorCtx.beginPath();
+            cursorCtx.moveTo(0, 0);
+            cursorCtx.lineTo(0, 16);
+            cursorCtx.lineTo(4, 12);
+            cursorCtx.lineTo(9, 17);
+            cursorCtx.lineTo(12, 15);
+            cursorCtx.lineTo(7, 10);
+            cursorCtx.lineTo(14, 10);
+            cursorCtx.closePath();
+
+            cursorCtx.fillStyle = cursor.color || '#ff0055';
+            cursorCtx.fill();
+            cursorCtx.strokeStyle = '#ffffff';
+            cursorCtx.lineWidth = 1.5;
+            cursorCtx.stroke();
+
+            const label = cursor.name || ('User ' + uid.substring(0, 4));
+            cursorCtx.font = '11px sans-serif';
+            cursorCtx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+            const textWidth = cursorCtx.measureText(label).width;
+            cursorCtx.fillRect(14, 14, textWidth + 8, 18);
+
+            cursorCtx.fillStyle = '#ffffff';
+            cursorCtx.fillText(label, 18, 27);
+
+            cursorCtx.restore();
           }
         }
 
@@ -251,33 +410,44 @@ app.get('/', (req, res) => {
           requestRender();
         }
 
-        function addImageToCanvas(imgData) {
-          const img = new Image();
-          img.src = imgData.src;
-          const obj = { angle: 0, ...imgData, imgElement: img };
-          
-          img.onload = () => {
-            imageObjects.push(obj);
+        function addMediaToCanvas(mediaData) {
+          if (mediaData.mediaType === 'image') {
+            const img = new Image();
+            img.src = mediaData.src;
+            const obj = { angle: 0, ...mediaData, imgElement: img };
+            img.onload = () => {
+              mediaObjects.push(obj);
+              requestRender();
+            };
+          } else if (mediaData.mediaType === 'video') {
+            const obj = { angle: 0, ...mediaData };
+            mediaObjects.push(obj);
             requestRender();
-          };
+          }
         }
 
-        function removeImageById(id) {
-          if (selectedImg && selectedImg.id === id) {
-            selectedImg = null;
+        function removeMediaById(id) {
+          if (selectedMedia && selectedMedia.id === id) {
+            selectedMedia = null;
             updateDeleteBtnVisibility();
           }
-          imageObjects = imageObjects.filter(img => img.id !== id);
+
+          const wrapper = document.getElementById('video_wrapper_' + id);
+          if (wrapper) {
+            wrapper.remove();
+          }
+
+          mediaObjects = mediaObjects.filter(m => m.id !== id);
           requestRender();
         }
 
-        function deleteSelectedImage() {
-          if (!selectedImg || selectedImg.ownerId !== myUserId) return;
-          const idToDelete = selectedImg.id;
-          removeImageById(idToDelete);
+        function deleteSelectedMedia() {
+          if (!selectedMedia || selectedMedia.ownerId !== myUserId) return;
+          const idToDelete = selectedMedia.id;
+          removeMediaById(idToDelete);
 
           if (socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ type: 'delete_image', id: idToDelete }));
+            socket.send(JSON.stringify({ type: 'delete_media', id: idToDelete }));
           }
         }
 
@@ -309,10 +479,9 @@ app.get('/', (req, res) => {
           return null;
         }
 
-        function getHitImage(worldX, worldY) {
-          for (let i = imageObjects.length - 1; i >= 0; i--) {
-            const obj = imageObjects[i];
-            // Only consider hit if current user owns the image
+        function getHitMedia(worldX, worldY) {
+          for (let i = mediaObjects.length - 1; i >= 0; i--) {
+            const obj = mediaObjects[i];
             if (obj.ownerId !== myUserId) continue;
 
             const local = toLocalCoords(obj, worldX, worldY);
@@ -324,12 +493,22 @@ app.get('/', (req, res) => {
           return null;
         }
 
+        function sendCursorPosition(x, y) {
+          const now = Date.now();
+          if (now - lastCursorSend > 30) {
+            if (socket.readyState === WebSocket.OPEN) {
+              socket.send(JSON.stringify({ type: 'cursor_move', x, y }));
+            }
+            lastCursorSend = now;
+          }
+        }
+
         mainCanvas.addEventListener('mousedown', (e) => {
           const x = e.clientX;
           const y = e.clientY;
 
-          if (selectedImg && selectedImg.ownerId === myUserId) {
-            const handle = getHitHandle(selectedImg, x, y);
+          if (selectedMedia && selectedMedia.ownerId === myUserId) {
+            const handle = getHitHandle(selectedMedia, x, y);
             if (handle) {
               dragMode = handle;
               isDragging = true;
@@ -337,19 +516,19 @@ app.get('/', (req, res) => {
             }
           }
 
-          const hitImg = getHitImage(x, y);
-          if (hitImg) {
-            selectedImg = hitImg;
+          const hitMedia = getHitMedia(x, y);
+          if (hitMedia) {
+            selectedMedia = hitMedia;
             dragMode = 'move';
             isDragging = true;
-            dragOffset = { x: x - selectedImg.x, y: y - selectedImg.y };
+            dragOffset = { x: x - selectedMedia.x, y: y - selectedMedia.y };
             updateDeleteBtnVisibility();
             requestRender();
             return;
           }
 
-          if (selectedImg) {
-            selectedImg = null;
+          if (selectedMedia) {
+            selectedMedia = null;
             updateDeleteBtnVisibility();
             requestRender();
           }
@@ -366,29 +545,31 @@ app.get('/', (req, res) => {
           const x = e.clientX;
           const y = e.clientY;
 
-          if (dragMode === 'move' && selectedImg && selectedImg.ownerId === myUserId) {
-            selectedImg.x = x - dragOffset.x;
-            selectedImg.y = y - dragOffset.y;
+          sendCursorPosition(x, y);
+
+          if (dragMode === 'move' && selectedMedia && selectedMedia.ownerId === myUserId) {
+            selectedMedia.x = x - dragOffset.x;
+            selectedMedia.y = y - dragOffset.y;
             requestRender();
-            syncImageUpdateThrottled(selectedImg);
+            syncMediaUpdateThrottled(selectedMedia);
             return;
           }
 
-          if (dragMode === 'resize' && selectedImg && selectedImg.ownerId === myUserId) {
-            const local = toLocalCoords(selectedImg, x, y);
-            selectedImg.w = Math.max(30, local.x * 2);
-            selectedImg.h = Math.max(30, local.y * 2);
+          if (dragMode === 'resize' && selectedMedia && selectedMedia.ownerId === myUserId) {
+            const local = toLocalCoords(selectedMedia, x, y);
+            selectedMedia.w = Math.max(50, local.x * 2);
+            selectedMedia.h = Math.max(50, local.y * 2);
             requestRender();
-            syncImageUpdateThrottled(selectedImg);
+            syncMediaUpdateThrottled(selectedMedia);
             return;
           }
 
-          if (dragMode === 'rotate' && selectedImg && selectedImg.ownerId === myUserId) {
-            const cx = selectedImg.x + selectedImg.w / 2;
-            const cy = selectedImg.y + selectedImg.h / 2;
-            selectedImg.angle = Math.atan2(y - cy, x - cx) + Math.PI / 2;
+          if (dragMode === 'rotate' && selectedMedia && selectedMedia.ownerId === myUserId) {
+            const cx = selectedMedia.x + selectedMedia.w / 2;
+            const cy = selectedMedia.y + selectedMedia.h / 2;
+            selectedMedia.angle = Math.atan2(y - cy, x - cx) + Math.PI / 2;
             requestRender();
-            syncImageUpdateThrottled(selectedImg);
+            syncMediaUpdateThrottled(selectedMedia);
             return;
           }
 
@@ -419,8 +600,8 @@ app.get('/', (req, res) => {
         mainCanvas.addEventListener('mousemove', handlePointerMove);
 
         window.addEventListener('mouseup', () => {
-          if (dragMode && selectedImg && selectedImg.ownerId === myUserId) {
-            syncImageUpdate(selectedImg);
+          if (dragMode && selectedMedia && selectedMedia.ownerId === myUserId) {
+            syncMediaUpdate(selectedMedia);
           }
           drawing = false;
           isDragging = false;
@@ -428,48 +609,50 @@ app.get('/', (req, res) => {
           lastPos = null;
         });
 
-        function syncImageUpdateThrottled(imgObj) {
+        function syncMediaUpdateThrottled(mediaObj) {
           const now = Date.now();
           if (now - lastNetworkSend > 40) {
-            syncImageUpdate(imgObj);
+            syncMediaUpdate(mediaObj);
             lastNetworkSend = now;
           }
         }
 
-        function syncImageUpdate(imgObj) {
-          if (socket.readyState === WebSocket.OPEN && imgObj.ownerId === myUserId) {
+        function syncMediaUpdate(mediaObj) {
+          if (socket.readyState === WebSocket.OPEN && mediaObj.ownerId === myUserId) {
             socket.send(JSON.stringify({
-              type: 'update_image',
-              id: imgObj.id,
-              x: imgObj.x,
-              y: imgObj.y,
-              w: imgObj.w,
-              h: imgObj.h,
-              angle: imgObj.angle
+              type: 'update_media',
+              id: mediaObj.id,
+              x: mediaObj.x,
+              y: mediaObj.y,
+              w: mediaObj.w,
+              h: mediaObj.h,
+              angle: mediaObj.angle
             }));
           }
         }
 
+        // Image upload handler
         imgUpload.addEventListener('change', (e) => {
           const file = e.target.files[0];
           if (file) {
             const reader = new FileReader();
             reader.onload = (event) => {
-              const newImgData = {
+              const newMediaData = {
                 id: Math.random().toString(36).substring(2, 10),
                 ownerId: myUserId,
+                mediaType: 'image',
                 src: event.target.result,
                 x: 100, y: 100,
                 w: 200, h: 200,
                 angle: 0
               };
 
-              addImageToCanvas(newImgData);
-              selectedImg = imageObjects[imageObjects.length - 1];
+              addMediaToCanvas(newMediaData);
+              selectedMedia = mediaObjects[mediaObjects.length - 1];
               updateDeleteBtnVisibility();
 
               if (socket.readyState === WebSocket.OPEN) {
-                socket.send(JSON.stringify({ type: 'add_image', image: newImgData }));
+                socket.send(JSON.stringify({ type: 'add_media', media: newMediaData }));
               }
             };
             reader.readAsDataURL(file);
@@ -477,7 +660,80 @@ app.get('/', (req, res) => {
           e.target.value = '';
         });
 
-        deleteImgBtn.addEventListener('click', deleteSelectedImage);
+        // Video upload and link dialog handler
+        addVideoBtn.addEventListener('click', () => {
+          const option = prompt("Enter '1' to paste a Video URL/YouTube link, or '2' to upload a file from your computer:");
+          if (option === '1') {
+            let url = prompt("Paste direct MP4/WebM URL or YouTube link:");
+            if (url) {
+              let isEmbed = false;
+              let embedUrl = url;
+
+              // Convert YouTube watch links to embed links
+              if (url.includes('youtube.com/watch?v=')) {
+                const videoId = url.split('v=')[1].split('&')[0];
+                embedUrl = \`https://www.youtube.com/embed/\${videoId}\`;
+                isEmbed = true;
+              } else if (url.includes('youtu.be/')) {
+                const videoId = url.split('youtu.be/')[1].split('?')[0];
+                embedUrl = \`https://www.youtube.com/embed/\${videoId}\`;
+                isEmbed = true;
+              }
+
+              const newMediaData = {
+                id: Math.random().toString(36).substring(2, 10),
+                ownerId: myUserId,
+                mediaType: 'video',
+                src: embedUrl,
+                isEmbed: isEmbed,
+                x: 150, y: 150,
+                w: 320, h: 240,
+                angle: 0
+              };
+
+              addMediaToCanvas(newMediaData);
+              selectedMedia = mediaObjects[mediaObjects.length - 1];
+              updateDeleteBtnVisibility();
+
+              if (socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({ type: 'add_media', media: newMediaData }));
+              }
+            }
+          } else if (option === '2') {
+            videoUpload.click();
+          }
+        });
+
+        videoUpload.addEventListener('change', (e) => {
+          const file = e.target.files[0];
+          if (file) {
+            const reader = new FileReader();
+            reader.onload = (event) => {
+              const newMediaData = {
+                id: Math.random().toString(36).substring(2, 10),
+                ownerId: myUserId,
+                mediaType: 'video',
+                src: event.target.result,
+                isEmbed: false,
+                x: 150, y: 150,
+                w: 320, h: 240,
+                angle: 0
+              };
+
+              addMediaToCanvas(newMediaData);
+              selectedMedia = mediaObjects[mediaObjects.length - 1];
+              updateDeleteBtnVisibility();
+
+              if (socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({ type: 'add_media', media: newMediaData }));
+              }
+            };
+            reader.readAsDataURL(file);
+          }
+          e.target.value = '';
+        });
+
+        deleteMediaBtn.addEventListener('click', deleteSelectedMedia);
 
         function triggerUndo() {
           if (undoStack.length === 0) return;
@@ -502,9 +758,9 @@ app.get('/', (req, res) => {
 
         window.addEventListener('keydown', (e) => {
           if (e.key === 'Delete' || e.key === 'Backspace') {
-            if (selectedImg && selectedImg.ownerId === myUserId) {
+            if (selectedMedia && selectedMedia.ownerId === myUserId) {
               e.preventDefault();
-              deleteSelectedImage();
+              deleteSelectedMedia();
             }
           }
           if (e.ctrlKey && e.key === 'z') { e.preventDefault(); triggerUndo(); }
@@ -529,25 +785,45 @@ app.get('/', (req, res) => {
 
           if (message.type === 'init') {
             myUserId = message.userId;
-            
-            if (message.images) {
-              message.images.forEach(img => addImageToCanvas(img));
+            remoteCursors = message.users || {};
+            userBadge.innerText = \`👥 \${Object.keys(remoteCursors).length} Online\`;
+
+            if (message.media) {
+              message.media.forEach(m => addMediaToCanvas(m));
             }
             
             rebuildFromHistory(message.history);
+            resizeCanvases();
           } 
+          else if (message.type === 'user_joined') {
+            remoteCursors[message.user.userId] = message.user;
+            userBadge.innerText = \`👥 \${Object.keys(remoteCursors).length} Online\`;
+            renderCursors();
+          }
+          else if (message.type === 'user_left') {
+            delete remoteCursors[message.userId];
+            userBadge.innerText = \`👥 \${Object.keys(remoteCursors).length} Online\`;
+            renderCursors();
+          }
+          else if (message.type === 'cursor_move') {
+            if (remoteCursors[message.userId]) {
+              remoteCursors[message.userId].x = message.x;
+              remoteCursors[message.userId].y = message.y;
+              renderCursors();
+            }
+          }
           else if (message.type === 'stroke') {
             if (message.userId !== myUserId) {
               strokeSegment(message.userId, message.x1, message.y1, message.x2, message.y2, message.color, message.size, message.isEraser);
             }
           }
-          else if (message.type === 'add_image') {
-            addImageToCanvas(message.image);
+          else if (message.type === 'add_media') {
+            addMediaToCanvas(message.media);
           }
-          else if (message.type === 'update_image') {
-            if (isDragging && selectedImg && selectedImg.id === message.id) return;
+          else if (message.type === 'update_media') {
+            if (isDragging && selectedMedia && selectedMedia.id === message.id) return;
 
-            const target = imageObjects.find(img => img.id === message.id);
+            const target = mediaObjects.find(m => m.id === message.id);
             if (target) {
               target.x = message.x;
               target.y = message.y;
@@ -557,8 +833,19 @@ app.get('/', (req, res) => {
               requestRender();
             }
           }
-          else if (message.type === 'delete_image') {
-            removeImageById(message.id);
+          else if (message.type === 'delete_media') {
+            removeMediaById(message.id);
+          }
+          else if (message.type === 'video_control') {
+            const wrapper = document.getElementById('video_wrapper_' + message.id);
+            if (wrapper) {
+              const video = wrapper.querySelector('video');
+              if (video) {
+                video.currentTime = message.time;
+                if (message.action === 'play') video.play();
+                if (message.action === 'pause') video.pause();
+              }
+            }
           }
           else if (message.type === 'update_history') {
             rebuildFromHistory(message.history);
@@ -574,12 +861,55 @@ let undoneHistory = [];
 
 wss.on('connection', (ws) => {
   const userId = Math.random().toString(36).substring(2, 10);
-  ws.send(JSON.stringify({ type: 'init', userId, history: drawHistory, images: imageStore }));
+  const userColor = getRandomColor();
+  const userName = 'User ' + userId.substring(0, 4);
+
+  connectedUsers[userId] = {
+    userId,
+    color: userColor,
+    name: userName,
+    x: 0,
+    y: 0
+  };
+
+  ws.send(JSON.stringify({ 
+    type: 'init', 
+    userId, 
+    history: drawHistory, 
+    media: mediaStore,
+    users: connectedUsers 
+  }));
+
+  wss.clients.forEach((client) => {
+    if (client !== ws && client.readyState === 1) {
+      client.send(JSON.stringify({
+        type: 'user_joined',
+        user: connectedUsers[userId]
+      }));
+    }
+  });
 
   ws.on('message', (msg) => {
     const data = JSON.parse(msg.toString());
 
-    if (data.type === 'stroke') {
+    if (data.type === 'cursor_move') {
+      if (connectedUsers[userId]) {
+        connectedUsers[userId].x = data.x;
+        connectedUsers[userId].y = data.y;
+
+        wss.clients.forEach((client) => {
+          if (client !== ws && client.readyState === 1) {
+            client.send(JSON.stringify({
+              type: 'cursor_move',
+              userId,
+              x: data.x,
+              y: data.y
+            }));
+          }
+        });
+      }
+    }
+    else if (data.type === 'stroke') {
       const strokeData = {
         type: 'stroke',
         strokeId: data.strokeId,
@@ -599,19 +929,17 @@ wss.on('connection', (ws) => {
         }
       });
     } 
-    else if (data.type === 'add_image') {
-      // Server ensures ownerId is tagged correctly
-      data.image.ownerId = userId;
-      imageStore.push(data.image);
+    else if (data.type === 'add_media') {
+      data.media.ownerId = userId;
+      mediaStore.push(data.media);
       wss.clients.forEach((client) => {
         if (client !== ws && client.readyState === 1) {
           client.send(JSON.stringify(data));
         }
       });
     }
-    else if (data.type === 'update_image') {
-      const target = imageStore.find(img => img.id === data.id);
-      // Validate ownership on backend before applying move/resize
+    else if (data.type === 'update_media') {
+      const target = mediaStore.find(m => m.id === data.id);
       if (target && target.ownerId === userId) {
         target.x = data.x;
         target.y = data.y;
@@ -626,17 +954,23 @@ wss.on('connection', (ws) => {
         });
       }
     }
-    else if (data.type === 'delete_image') {
-      const target = imageStore.find(img => img.id === data.id);
-      // Validate ownership on backend before deleting
+    else if (data.type === 'delete_media') {
+      const target = mediaStore.find(m => m.id === data.id);
       if (target && target.ownerId === userId) {
-        imageStore = imageStore.filter(img => img.id !== data.id);
+        mediaStore = mediaStore.filter(m => m.id !== data.id);
         wss.clients.forEach((client) => {
           if (client !== ws && client.readyState === 1) {
             client.send(JSON.stringify(data));
           }
         });
       }
+    }
+    else if (data.type === 'video_control') {
+      wss.clients.forEach((client) => {
+        if (client !== ws && client.readyState === 1) {
+          client.send(JSON.stringify(data));
+        }
+      });
     }
     else if (data.type === 'undo') {
       const removed = drawHistory.filter(item => item.strokeId === data.strokeId);
@@ -660,6 +994,18 @@ wss.on('connection', (ws) => {
         }
       });
     }
+  });
+
+  ws.on('close', () => {
+    delete connectedUsers[userId];
+    wss.clients.forEach((client) => {
+      if (client.readyState === 1) {
+        client.send(JSON.stringify({
+          type: 'user_left',
+          userId
+        }));
+      }
+    });
   });
 });
 
