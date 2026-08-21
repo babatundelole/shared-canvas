@@ -6,7 +6,9 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-// Serve complete drawing app on root request
+// Array to store all drawn points globally in server memory
+const drawHistory = [];
+
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -42,7 +44,7 @@ app.get('/', (req, res) => {
           status.style.color = "#00ff00";
         };
 
-        socket.onerror = (err) => {
+        socket.onerror = () => {
           status.innerText = "Connection Failed";
           status.style.color = "#ff0000";
         };
@@ -50,27 +52,32 @@ app.get('/', (req, res) => {
         let drawing = false;
         const color = 'hsl(' + Math.floor(Math.random() * 360) + ', 100%, 50%)';
 
-        function draw(x, y, send = true) {
-          ctx.fillStyle = color;
+        function drawPoint(x, y, c, send = true) {
+          ctx.fillStyle = c;
           ctx.beginPath();
           ctx.arc(x, y, 6, 0, Math.PI * 2);
           ctx.fill();
 
           if (send && socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ x, y, color }));
+            socket.send(JSON.stringify({ type: 'draw', x, y, color: c }));
           }
         }
 
-        canvas.addEventListener('mousedown', (e) => { drawing = true; draw(e.clientX, e.clientY); });
-        canvas.addEventListener('mousemove', (e) => { if (drawing) draw(e.clientX, e.clientY); });
+        canvas.addEventListener('mousedown', (e) => { drawing = true; drawPoint(e.clientX, e.clientY, color); });
+        canvas.addEventListener('mousemove', (e) => { if (drawing) drawPoint(e.clientX, e.clientY, color); });
         window.addEventListener('mouseup', () => drawing = false);
 
         socket.onmessage = (e) => {
-          const data = JSON.parse(e.data);
-          ctx.fillStyle = data.color;
-          ctx.beginPath();
-          ctx.arc(data.x, data.y, 6, 0, Math.PI * 2);
-          ctx.fill();
+          const message = JSON.parse(e.data);
+
+          // Handle initial full canvas history load
+          if (message.type === 'history') {
+            message.data.forEach(pt => drawPoint(pt.x, pt.y, pt.color, false));
+          } 
+          // Handle real-time incoming points from other users
+          else if (message.type === 'draw') {
+            drawPoint(message.x, message.y, message.color, false);
+          }
         };
       </script>
     </body>
@@ -79,14 +86,28 @@ app.get('/', (req, res) => {
 });
 
 wss.on('connection', (ws) => {
-  console.log('SUCCESS: Browser connected!');
+  console.log('User connected');
+
+  // 1. Immediately send full existing drawing history to the newly connected user
+  ws.send(JSON.stringify({ type: 'history', data: drawHistory }));
+
+  // 2. Listen for new draw events
   ws.on('message', (msg) => {
-    wss.clients.forEach((client) => {
-      if (client !== ws && client.readyState === 1) client.send(msg.toString());
-    });
+    const data = JSON.parse(msg.toString());
+    if (data.type === 'draw') {
+      // Save point to server history
+      drawHistory.push({ x: data.x, y: data.y, color: data.color });
+
+      // Broadcast point to all other connected users
+      wss.clients.forEach((client) => {
+        if (client !== ws && client.readyState === 1) {
+          client.send(JSON.stringify(data));
+        }
+      });
+    }
   });
 });
 
-server.listen(3000, () => {
-  console.log('--- SERVER RUNNING AT http://localhost:3000 ---');
+const listener = server.listen(process.env.PORT || 3000, () => {
+  console.log('Server running on port ' + listener.address().port);
 });
