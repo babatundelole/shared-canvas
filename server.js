@@ -80,7 +80,6 @@ app.get('/', (req, res) => {
         #deleteMediaBtn:hover { background: #e74c3c; }
         input[type="file"] { display: none; }
         .control-group { display: flex; align-items: center; gap: 4px; }
-        #zoomLevel { font-size: 11px; color: #aaa; font-weight: bold; }
       </style>
     </head>
     <body>
@@ -148,6 +147,9 @@ app.get('/', (req, res) => {
         let isPanning = false;
         let isSpacePressed = false;
         let panStart = { x: 0, y: 0 };
+
+        // Disable context menu on canvas so right-click pan works cleanly
+        mainCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
         function screenToWorld(screenX, screenY) {
           return {
@@ -522,8 +524,8 @@ app.get('/', (req, res) => {
         }, { passive: false });
 
         mainCanvas.addEventListener('mousedown', (e) => {
-          // Pan with Middle Click (button 1) or Spacebar + Left Click
-          if (e.button === 1 || (isSpacePressed && e.button === 0)) {
+          // Pan via Right Click (button 2), Middle Click (button 1), or Spacebar + Left Click (button 0)
+          if (e.button === 2 || e.button === 1 || (isSpacePressed && e.button === 0)) {
             isPanning = true;
             panStart = { x: e.clientX - transform.x, y: e.clientY - transform.y };
             return;
