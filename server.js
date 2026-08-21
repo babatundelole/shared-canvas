@@ -305,6 +305,7 @@ app.get('/', (req, res) => {
             cursorCtx.save();
             cursorCtx.translate(cursor.x, cursor.y);
 
+            // Draw Pointer Arrow
             cursorCtx.beginPath();
             cursorCtx.moveTo(0, 0);
             cursorCtx.lineTo(0, 16);
@@ -321,6 +322,7 @@ app.get('/', (req, res) => {
             cursorCtx.lineWidth = 1.5;
             cursorCtx.stroke();
 
+            // Draw User Tag
             const label = cursor.name || ('User ' + uid.substring(0, 4));
             cursorCtx.font = '11px sans-serif';
             cursorCtx.fillStyle = 'rgba(0, 0, 0, 0.75)';
@@ -467,12 +469,10 @@ app.get('/', (req, res) => {
           }
         }
 
-        // Prevent browser context menu on canvas right-click
         mainCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
         cursorCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
         mainCanvas.addEventListener('mousedown', (e) => {
-          // Ignore clicks that are NOT left click
           if (e.button !== 0) return;
 
           const x = e.clientX;
@@ -568,6 +568,7 @@ app.get('/', (req, res) => {
           lastPos = currentPos;
         }
 
+        // Track cursor even when mouse is simply hovering over canvas
         mainCanvas.addEventListener('mousemove', handlePointerMove);
 
         window.addEventListener('mouseup', () => {
