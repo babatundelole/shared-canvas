@@ -5,10 +5,28 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-let drawHistory = [];
-let mediaStore = [];
-let chatHistory = [];
-const connectedUsers = {};
+// Per-room state storage
+const rooms = {};
+
+function getOrCreateRoom(roomId) {
+  if (!rooms[roomId]) {
+    rooms[roomId] = {
+      drawHistory: [],
+      mediaStore: [],
+      chatHistory: [],
+      connectedUsers: {},
+      gameState: {
+        board: Array(9).fill(null),
+        turn: 'X',
+        winner: null,
+        players: { X: null, O: null },
+        visible: false,
+        x: 200, y: 200
+      }
+    };
+  }
+  return rooms[roomId];
+}
 
 function getRandomColor() {
   const letters = '0123456789ABCDEF';
@@ -38,7 +56,7 @@ app.get('/', (req, res) => {
         canvas { display: block; position: absolute; top: 0; left: 0; }
         #mainCanvas { z-index: 2; }
         #cursorCanvas { z-index: 3; pointer-events: none; }
-        #overlayContainer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; }
+        #overlayContainer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 4; }
 
         .canvas-video-wrapper {
           position: absolute;
@@ -69,11 +87,12 @@ app.get('/', (req, res) => {
           cursor: pointer; background: transparent;
         }
         
-        select, button, label.btn {
+        select, button, label.btn, input[type="text"].room-input {
           background: #333; color: white; border: 1px solid #555; padding: 5px 10px;
           border-radius: 4px; font-weight: bold; cursor: pointer; transition: all 0.2s;
           font-size: 12px;
         }
+        input[type="text"].room-input { cursor: text; width: 90px; }
         button:hover, label.btn:hover, select:hover { background: #444; }
         button.active { background: #e74c3c; border-color: #ff6b6b; }
 
@@ -133,6 +152,34 @@ app.get('/', (req, res) => {
           padding: 0 12px; cursor: pointer; font-size: 12px;
         }
         #chatSendBtn:hover { background: #00cca3; }
+
+        /* Tic-Tac-Toe Game Widget */
+        #gameWidget {
+          position: absolute; width: 220px; background: rgba(20, 20, 20, 0.95);
+          border: 2px solid #00ffcc; border-radius: 10px; padding: 12px;
+          box-shadow: 0 8px 24px rgba(0,0,0,0.8); z-index: 5; pointer-events: auto;
+          display: none; user-select: none;
+        }
+        #gameHeader {
+          display: flex; justify-content: space-between; align-items: center;
+          font-size: 13px; font-weight: bold; color: #00ffcc; margin-bottom: 8px;
+          cursor: move; padding-bottom: 4px; border-bottom: 1px solid #333;
+        }
+        #gameStatus { font-size: 11px; color: #aaa; text-align: center; margin-bottom: 8px; }
+        .ttt-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+        .ttt-cell {
+          width: 60px; height: 60px; background: #222; border: 1px solid #444;
+          border-radius: 6px; display: flex; align-items: center; justify-content: center;
+          font-size: 24px; font-weight: bold; color: #fff; cursor: pointer; transition: background 0.2s;
+        }
+        .ttt-cell:hover { background: #333; }
+        .ttt-cell.x { color: #00ffcc; }
+        .ttt-cell.o { color: #ff0055; }
+        #resetGameBtn {
+          width: 100%; margin-top: 10px; background: #333; color: #fff; border: 1px solid #555;
+          padding: 6px; border-radius: 4px; font-size: 11px; font-weight: bold; cursor: pointer;
+        }
+        #resetGameBtn:hover { background: #444; }
       </style>
     </head>
     <body>
@@ -152,6 +199,12 @@ app.get('/', (req, res) => {
       <div id="toolbar">
         <span id="status">Connecting...</span>
         <span id="userBadge">👥 1 Online</span>
+
+        <div class="control-group">
+          <label>Room:</label>
+          <input type="text" id="roomInput" class="room-input" placeholder="Room ID">
+          <button id="joinRoomBtn">Go</button>
+        </div>
 
         <div class="control-group">
           <label>Brush:</label>
@@ -181,6 +234,7 @@ app.get('/', (req, res) => {
         <label for="videoUpload" class="btn">Add Video</label>
         <input type="file" id="videoUpload" accept="video/*">
 
+        <button id="toggleGameBtn">🎮 Tic-Tac-Toe</button>
         <button id="deleteMediaBtn">Delete Selected</button>
         <button id="editProfileBtn">Profile</button>
       </div>
@@ -197,11 +251,37 @@ app.get('/', (req, res) => {
         </div>
       </div>
 
+      <!-- Tic-Tac-Toe Widget -->
+      <div id="gameWidget">
+        <div id="gameHeader">
+          <span>🎮 Tic-Tac-Toe</span>
+          <span id="closeGameBtn" style="cursor:pointer;">✕</span>
+        </div>
+        <div id="gameStatus">Waiting for moves...</div>
+        <div class="ttt-grid">
+          <div class="ttt-cell" data-index="0"></div>
+          <div class="ttt-cell" data-index="1"></div>
+          <div class="ttt-cell" data-index="2"></div>
+          <div class="ttt-cell" data-index="3"></div>
+          <div class="ttt-cell" data-index="4"></div>
+          <div class="ttt-cell" data-index="5"></div>
+          <div class="ttt-cell" data-index="6"></div>
+          <div class="ttt-cell" data-index="7"></div>
+          <div class="ttt-cell" data-index="8"></div>
+        </div>
+        <button id="resetGameBtn">Restart Game</button>
+      </div>
+
       <div id="overlayContainer"></div>
       <canvas id="mainCanvas"></canvas>
       <canvas id="cursorCanvas"></canvas>
 
       <script>
+        // Get Room ID from URL
+        const urlParams = new URLSearchParams(window.location.search);
+        let currentRoom = urlParams.get('room') || 'main';
+        document.getElementById('roomInput').value = currentRoom;
+
         const status = document.getElementById('status');
         const userBadge = document.getElementById('userBadge');
         const mainCanvas = document.getElementById('mainCanvas');
@@ -219,7 +299,9 @@ app.get('/', (req, res) => {
         const imgUpload = document.getElementById('imgUpload');
         const videoUpload = document.getElementById('videoUpload');
         const deleteMediaBtn = document.getElementById('deleteMediaBtn');
-        
+        const roomInput = document.getElementById('roomInput');
+        const joinRoomBtn = document.getElementById('joinRoomBtn');
+
         const profileModal = document.getElementById('profileModal');
         const modalNameInput = document.getElementById('modalNameInput');
         const modalColorInput = document.getElementById('modalColorInput');
@@ -233,10 +315,25 @@ app.get('/', (req, res) => {
         const chatInput = document.getElementById('chatInput');
         const chatSendBtn = document.getElementById('chatSendBtn');
 
+        // Game Elements
+        const toggleGameBtn = document.getElementById('toggleGameBtn');
+        const gameWidget = document.getElementById('gameWidget');
+        const gameHeader = document.getElementById('gameHeader');
+        const closeGameBtn = document.getElementById('closeGameBtn');
+        const gameStatus = document.getElementById('gameStatus');
+        const tttCells = document.querySelectorAll('.ttt-cell');
+        const resetGameBtn = document.getElementById('resetGameBtn');
+
         let myUserId = null;
         let myName = 'User';
         let myCursorColor = '#00ffcc';
         let unreadCount = 0;
+
+        // Handle Room Switch
+        joinRoomBtn.addEventListener('click', () => {
+          const targetRoom = roomInput.value.trim() || 'main';
+          window.location.search = '?room=' + encodeURIComponent(targetRoom);
+        });
 
         function resizeCanvases() {
           mainCanvas.width = window.innerWidth;
@@ -273,10 +370,10 @@ app.get('/', (req, res) => {
         let lastCursorSend = 0;
 
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const socket = new WebSocket(\`\${protocol}//\${location.host}\`);
+        const socket = new WebSocket(\`\${protocol}//\${location.host}?room=\${encodeURIComponent(currentRoom)}\`);
 
         socket.onopen = () => {
-          status.innerText = "CONNECTED";
+          status.innerText = "CONNECTED (" + currentRoom + ")";
           status.style.color = "#00ff00";
         };
 
@@ -353,6 +450,87 @@ app.get('/', (req, res) => {
             unreadCount++;
             chatBadge.innerText = unreadCount;
             chatBadge.style.display = 'inline-block';
+          }
+        }
+
+        // --- Tic-Tac-Toe Game Interactions ---
+        let isDraggingGame = false;
+        let gameDragOffset = { x: 0, y: 0 };
+
+        toggleGameBtn.addEventListener('click', () => {
+          const isVisible = gameWidget.style.display === 'block';
+          const newVisible = !isVisible;
+          gameWidget.style.display = newVisible ? 'block' : 'none';
+          
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'game_toggle', visible: newVisible }));
+          }
+        });
+
+        closeGameBtn.addEventListener('click', () => {
+          gameWidget.style.display = 'none';
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'game_toggle', visible: false }));
+          }
+        });
+
+        gameHeader.addEventListener('mousedown', (e) => {
+          isDraggingGame = true;
+          gameDragOffset = {
+            x: e.clientX - gameWidget.offsetLeft,
+            y: e.clientY - gameWidget.offsetTop
+          };
+        });
+
+        window.addEventListener('mousemove', (e) => {
+          if (isDraggingGame) {
+            const nx = e.clientX - gameDragOffset.x;
+            const ny = e.clientY - gameDragOffset.y;
+            gameWidget.style.left = nx + 'px';
+            gameWidget.style.top = ny + 'px';
+
+            if (socket.readyState === WebSocket.OPEN) {
+              socket.send(JSON.stringify({ type: 'game_move_widget', x: nx, y: ny }));
+            }
+          }
+        });
+
+        window.addEventListener('mouseup', () => {
+          isDraggingGame = false;
+        });
+
+        tttCells.forEach(cell => {
+          cell.addEventListener('click', () => {
+            const index = parseInt(cell.getAttribute('data-index'));
+            if (socket.readyState === WebSocket.OPEN) {
+              socket.send(JSON.stringify({ type: 'game_click', index }));
+            }
+          });
+        });
+
+        resetGameBtn.addEventListener('click', () => {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'game_reset' }));
+          }
+        });
+
+        function renderGameState(state) {
+          if (!state) return;
+
+          gameWidget.style.display = state.visible ? 'block' : 'none';
+          gameWidget.style.left = state.x + 'px';
+          gameWidget.style.top = state.y + 'px';
+
+          tttCells.forEach((cell, idx) => {
+            const val = state.board[idx];
+            cell.innerText = val || '';
+            cell.className = 'ttt-cell' + (val ? ' ' + val.toLowerCase() : '');
+          });
+
+          if (state.winner) {
+            gameStatus.innerText = state.winner === 'Draw' ? "Game ended in a Draw!" : \`Player \${state.winner} Wins!\`;
+          } else {
+            gameStatus.innerText = \`Turn: Player \${state.turn}\`;
           }
         }
 
@@ -848,7 +1026,7 @@ app.get('/', (req, res) => {
         redoBtn.addEventListener('click', triggerRedo);
 
         window.addEventListener('keydown', (e) => {
-          if (document.activeElement === chatInput || document.activeElement === modalNameInput) return;
+          if (document.activeElement === chatInput || document.activeElement === modalNameInput || document.activeElement === roomInput) return;
 
           if (e.key === 'Delete' || e.key === 'Backspace') {
             if (selectedMedia && selectedMedia.ownerId === myUserId) {
@@ -894,14 +1072,15 @@ app.get('/', (req, res) => {
             if (message.chats) {
               message.chats.forEach(c => appendChatMessage(c.author, c.text, c.color));
             }
-            
+
+            renderGameState(message.gameState);
             rebuildFromHistory(message.history);
             resizeCanvases();
           } 
           else if (message.type === 'user_joined') {
             remoteCursors[message.user.userId] = message.user;
             userBadge.innerText = \`👥 \${Object.keys(remoteCursors).length} Online\`;
-            appendChatMessage(null, \`\${message.user.name} joined the canvas\`, null, true);
+            appendChatMessage(null, \`\${message.user.name} joined the room\`, null, true);
             renderCursors();
           }
           else if (message.type === 'user_left') {
@@ -922,6 +1101,9 @@ app.get('/', (req, res) => {
           }
           else if (message.type === 'chat_msg') {
             appendChatMessage(message.author, message.text, message.color);
+          }
+          else if (message.type === 'game_update') {
+            renderGameState(message.gameState);
           }
           else if (message.type === 'cursor_move') {
             if (remoteCursors[message.userId]) {
@@ -964,95 +1146,150 @@ app.get('/', (req, res) => {
   `);
 });
 
-let undoneHistory = [];
+let undoneHistory = {};
 
-wss.on('connection', (ws) => {
+function checkTTTWinner(board) {
+  const lines = [
+    [0, 1, 2], [3, 4, 5], [6, 7, 8],
+    [0, 3, 6], [1, 4, 7], [2, 5, 8],
+    [0, 4, 8], [2, 4, 6]
+  ];
+  for (let l of lines) {
+    if (board[l[0]] && board[l[0]] === board[l[1]] && board[l[0]] === board[l[2]]) {
+      return board[l[0]];
+    }
+  }
+  if (board.every(cell => cell !== null)) return 'Draw';
+  return null;
+}
+
+wss.on('connection', (ws, req) => {
+  const url = new URL(req.url, 'http://localhost');
+  const roomId = url.searchParams.get('room') || 'main';
+  const room = getOrCreateRoom(roomId);
+
+  if (!undoneHistory[roomId]) undoneHistory[roomId] = [];
+
   const userId = Math.random().toString(36).substring(2, 10);
   const userColor = getRandomColor();
   const userName = 'User ' + userId.substring(0, 4);
 
-  connectedUsers[userId] = {
+  room.connectedUsers[userId] = {
     userId,
     color: userColor,
     name: userName,
+    ws,
     x: 0,
     y: 0
   };
 
+  // Broadcast function to room members
+  function broadcastRoom(data, excludeWs = null) {
+    for (let id in room.connectedUsers) {
+      const clientWs = room.connectedUsers[id].ws;
+      if (clientWs !== excludeWs && clientWs.readyState === 1) {
+        clientWs.send(JSON.stringify(data));
+      }
+    }
+  }
+
+  // Sanitize user list for network transmission (remove circular WS ref)
+  function getSanitizedUsers() {
+    const list = {};
+    for (let id in room.connectedUsers) {
+      const u = room.connectedUsers[id];
+      list[id] = { userId: u.userId, color: u.color, name: u.name, x: u.x, y: u.y };
+    }
+    return list;
+  }
+
   ws.send(JSON.stringify({ 
     type: 'init', 
     userId, 
-    user: connectedUsers[userId],
-    history: drawHistory, 
-    media: mediaStore,
-    chats: chatHistory,
-    users: connectedUsers 
+    user: { userId, color: userColor, name: userName },
+    history: room.drawHistory, 
+    media: room.mediaStore,
+    chats: room.chatHistory,
+    gameState: room.gameState,
+    users: getSanitizedUsers() 
   }));
 
-  wss.clients.forEach((client) => {
-    if (client !== ws && client.readyState === 1) {
-      client.send(JSON.stringify({
-        type: 'user_joined',
-        user: connectedUsers[userId]
-      }));
-    }
-  });
+  broadcastRoom({
+    type: 'user_joined',
+    user: { userId, color: userColor, name: userName }
+  }, ws);
 
   ws.on('message', (msg) => {
     const data = JSON.parse(msg.toString());
 
     if (data.type === 'update_profile') {
-      if (connectedUsers[userId]) {
-        connectedUsers[userId].name = data.name;
-        connectedUsers[userId].color = data.color;
+      if (room.connectedUsers[userId]) {
+        room.connectedUsers[userId].name = data.name;
+        room.connectedUsers[userId].color = data.color;
 
-        wss.clients.forEach((client) => {
-          if (client.readyState === 1) {
-            client.send(JSON.stringify({
-              type: 'update_profile',
-              userId,
-              name: data.name,
-              color: data.color
-            }));
-          }
+        broadcastRoom({
+          type: 'update_profile',
+          userId,
+          name: data.name,
+          color: data.color
         });
       }
     }
     else if (data.type === 'chat_msg') {
-      const user = connectedUsers[userId];
+      const user = room.connectedUsers[userId];
       const chatItem = {
         author: user ? user.name : 'User',
         text: data.text,
         color: user ? user.color : '#00ffcc'
       };
       
-      chatHistory.push(chatItem);
-      if (chatHistory.length > 50) chatHistory.shift();
+      room.chatHistory.push(chatItem);
+      if (room.chatHistory.length > 50) room.chatHistory.shift();
 
-      wss.clients.forEach((client) => {
-        if (client.readyState === 1) {
-          client.send(JSON.stringify({
-            type: 'chat_msg',
-            ...chatItem
-          }));
-        }
+      broadcastRoom({
+        type: 'chat_msg',
+        ...chatItem
       });
     }
+    else if (data.type === 'game_toggle') {
+      room.gameState.visible = data.visible;
+      broadcastRoom({ type: 'game_update', gameState: room.gameState });
+    }
+    else if (data.type === 'game_move_widget') {
+      room.gameState.x = data.x;
+      room.gameState.y = data.y;
+      broadcastRoom({ type: 'game_update', gameState: room.gameState }, ws);
+    }
+    else if (data.type === 'game_click') {
+      const idx = data.index;
+      if (!room.gameState.board[idx] && !room.gameState.winner) {
+        room.gameState.board[idx] = room.gameState.turn;
+        const win = checkTTTWinner(room.gameState.board);
+        if (win) {
+          room.gameState.winner = win;
+        } else {
+          room.gameState.turn = room.gameState.turn === 'X' ? 'O' : 'X';
+        }
+        broadcastRoom({ type: 'game_update', gameState: room.gameState });
+      }
+    }
+    else if (data.type === 'game_reset') {
+      room.gameState.board = Array(9).fill(null);
+      room.gameState.turn = 'X';
+      room.gameState.winner = null;
+      broadcastRoom({ type: 'game_update', gameState: room.gameState });
+    }
     else if (data.type === 'cursor_move') {
-      if (connectedUsers[userId]) {
-        connectedUsers[userId].x = data.x;
-        connectedUsers[userId].y = data.y;
+      if (room.connectedUsers[userId]) {
+        room.connectedUsers[userId].x = data.x;
+        room.connectedUsers[userId].y = data.y;
 
-        wss.clients.forEach((client) => {
-          if (client !== ws && client.readyState === 1) {
-            client.send(JSON.stringify({
-              type: 'cursor_move',
-              userId,
-              x: data.x,
-              y: data.y
-            }));
-          }
-        });
+        broadcastRoom({
+          type: 'cursor_move',
+          userId,
+          x: data.x,
+          y: data.y
+        }, ws);
       }
     }
     else if (data.type === 'stroke') {
@@ -1067,25 +1304,16 @@ wss.on('connection', (ws) => {
         isEraser: data.isEraser
       };
 
-      drawHistory.push(strokeData);
-
-      wss.clients.forEach((client) => {
-        if (client.readyState === 1) {
-          client.send(JSON.stringify(strokeData));
-        }
-      });
+      room.drawHistory.push(strokeData);
+      broadcastRoom(strokeData);
     } 
     else if (data.type === 'add_media') {
       data.media.ownerId = userId;
-      mediaStore.push(data.media);
-      wss.clients.forEach((client) => {
-        if (client !== ws && client.readyState === 1) {
-          client.send(JSON.stringify(data));
-        }
-      });
+      room.mediaStore.push(data.media);
+      broadcastRoom(data, ws);
     }
     else if (data.type === 'update_media') {
-      const target = mediaStore.find(m => m.id === data.id);
+      const target = room.mediaStore.find(m => m.id === data.id);
       if (target && target.ownerId === userId) {
         target.x = data.x;
         target.y = data.y;
@@ -1093,57 +1321,37 @@ wss.on('connection', (ws) => {
         target.h = data.h;
         target.angle = data.angle;
 
-        wss.clients.forEach((client) => {
-          if (client !== ws && client.readyState === 1) {
-            client.send(JSON.stringify(data));
-          }
-        });
+        broadcastRoom(data, ws);
       }
     }
     else if (data.type === 'delete_media') {
-      const target = mediaStore.find(m => m.id === data.id);
+      const target = room.mediaStore.find(m => m.id === data.id);
       if (target && target.ownerId === userId) {
-        mediaStore = mediaStore.filter(m => m.id !== data.id);
-        wss.clients.forEach((client) => {
-          if (client !== ws && client.readyState === 1) {
-            client.send(JSON.stringify(data));
-          }
-        });
+        room.mediaStore = room.mediaStore.filter(m => m.id !== data.id);
+        broadcastRoom(data, ws);
       }
     }
     else if (data.type === 'undo') {
-      const removed = drawHistory.filter(item => item.strokeId === data.strokeId);
-      drawHistory = drawHistory.filter(item => item.strokeId !== data.strokeId);
-      undoneHistory.push(...removed);
+      const removed = room.drawHistory.filter(item => item.strokeId === data.strokeId);
+      room.drawHistory = room.drawHistory.filter(item => item.strokeId !== data.strokeId);
+      undoneHistory[roomId].push(...removed);
 
-      wss.clients.forEach((client) => {
-        if (client.readyState === 1) {
-          client.send(JSON.stringify({ type: 'update_history', history: drawHistory }));
-        }
-      });
+      broadcastRoom({ type: 'update_history', history: room.drawHistory });
     }
     else if (data.type === 'redo') {
-      const restored = undoneHistory.filter(item => item.strokeId === data.strokeId);
-      undoneHistory = undoneHistory.filter(item => item.strokeId !== data.strokeId);
-      drawHistory.push(...restored);
+      const restored = undoneHistory[roomId].filter(item => item.strokeId === data.strokeId);
+      undoneHistory[roomId] = undoneHistory[roomId].filter(item => item.strokeId !== data.strokeId);
+      room.drawHistory.push(...restored);
 
-      wss.clients.forEach((client) => {
-        if (client.readyState === 1) {
-          client.send(JSON.stringify({ type: 'update_history', history: drawHistory }));
-        }
-      });
+      broadcastRoom({ type: 'update_history', history: room.drawHistory });
     }
   });
 
   ws.on('close', () => {
-    delete connectedUsers[userId];
-    wss.clients.forEach((client) => {
-      if (client.readyState === 1) {
-        client.send(JSON.stringify({
-          type: 'user_left',
-          userId
-        }));
-      }
+    delete room.connectedUsers[userId];
+    broadcastRoom({
+      type: 'user_left',
+      userId
     });
   });
 });
