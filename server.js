@@ -7,15 +7,8 @@ const wss = new WebSocketServer({ server });
 
 let drawHistory = [];
 let mediaStore = [];
-let versionHistory = []; // Snapshots of board states
+let versionHistory = []; // Kept snapshot storage for history view
 const connectedUsers = {};
-
-// Timer State
-let timerState = {
-  remainingSeconds: 0,
-  isRunning: false,
-  timerInterval: null
-};
 
 function getRandomColor() {
   const letters = '0123456789ABCDEF';
@@ -33,44 +26,12 @@ function broadcast(data) {
   });
 }
 
-function startTimer(seconds) {
-  if (timerState.timerInterval) clearInterval(timerState.timerInterval);
-  timerState.remainingSeconds = seconds;
-  timerState.isRunning = true;
-
-  broadcast({ type: 'timer_update', remaining: timerState.remainingSeconds, isRunning: true });
-
-  timerState.timerInterval = setInterval(() => {
-    timerState.remainingSeconds--;
-    if (timerState.remainingSeconds <= 0) {
-      clearInterval(timerState.timerInterval);
-      timerState.isRunning = false;
-      timerState.remainingSeconds = 0;
-      broadcast({ type: 'timer_finished' });
-    }
-    broadcast({ type: 'timer_update', remaining: timerState.remainingSeconds, isRunning: timerState.isRunning });
-  }, 1000);
-}
-
-function pauseTimer() {
-  if (timerState.timerInterval) clearInterval(timerState.timerInterval);
-  timerState.isRunning = false;
-  broadcast({ type: 'timer_update', remaining: timerState.remainingSeconds, isRunning: false });
-}
-
-function resetTimer() {
-  if (timerState.timerInterval) clearInterval(timerState.timerInterval);
-  timerState.isRunning = false;
-  timerState.remainingSeconds = 0;
-  broadcast({ type: 'timer_update', remaining: 0, isRunning: false });
-}
-
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
     <html>
     <head>
-      <title>Collaborative Canvas with Timer & Version History</title>
+      <title>Collaborative Canvas</title>
       <style>
         body { margin: 0; background: #111; overflow: hidden; font-family: sans-serif; transition: background 0.3s; }
         body.theme-light { background: #f4f4f9; }
@@ -122,18 +83,6 @@ app.get('/', (req, res) => {
         }
         button:hover, label.btn:hover, select:hover { background: #444; }
         button.active { background: #e74c3c; border-color: #ff6b6b; }
-
-        /* Timer Widget Style */
-        #timerWidget {
-          position: fixed; top: 15px; right: 15px; z-index: 10;
-          background: rgba(20, 20, 25, 0.9); border: 1px solid #00ffcc;
-          padding: 8px 16px; border-radius: 20px; color: #00ffcc;
-          display: flex; align-items: center; gap: 10px; font-family: monospace;
-          box-shadow: 0 4px 12px rgba(0,0,0,0.5); backdrop-filter: blur(8px);
-        }
-        #timerDisplay { font-size: 18px; font-weight: bold; min-width: 60px; text-align: center; }
-        .timer-btn { background: #00ffcc; color: #111; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-weight: bold; }
-        .timer-btn:hover { background: #33ffe0; }
 
         /* Version History Modal */
         #historyModal {
@@ -193,19 +142,8 @@ app.get('/', (req, res) => {
         <label for="videoUpload" class="btn">Add Video File</label>
         <input type="file" id="videoUpload" accept="video/*">
 
-        <button id="snapshotBtn">📸 Save Version Snapshot</button>
         <button id="historyBtn">📜 Version History</button>
         <button id="deleteMediaBtn">Delete Selected</button>
-      </div>
-
-      <!-- Synchronized Timer Widget -->
-      <div id="timerWidget">
-        <span>⏱️</span>
-        <div id="timerDisplay">00:00</div>
-        <button class="timer-btn" id="timerSet5">5m</button>
-        <button class="timer-btn" id="timerSet10">10m</button>
-        <button class="timer-btn" id="timerToggle">Start</button>
-        <button class="timer-btn" id="timerReset">Reset</button>
       </div>
 
       <!-- Version History Modal -->
@@ -244,22 +182,11 @@ app.get('/', (req, res) => {
         const videoUpload = document.getElementById('videoUpload');
         const deleteMediaBtn = document.getElementById('deleteMediaBtn');
 
-        // Timer DOM Elements
-        const timerDisplay = document.getElementById('timerDisplay');
-        const timerToggle = document.getElementById('timerToggle');
-        const timerReset = document.getElementById('timerReset');
-        const timerSet5 = document.getElementById('timerSet5');
-        const timerSet10 = document.getElementById('timerSet10');
-
         // Version History DOM Elements
-        const snapshotBtn = document.getElementById('snapshotBtn');
         const historyBtn = document.getElementById('historyBtn');
         const historyModal = document.getElementById('historyModal');
         const closeHistoryModal = document.getElementById('closeHistoryModal');
         const historyList = document.getElementById('historyList');
-
-        let isTimerRunning = false;
-        let localRemainingSeconds = 0;
 
         function resizeCanvases() {
           mainCanvas.width = window.innerWidth;
@@ -415,53 +342,7 @@ app.get('/', (req, res) => {
           wrapper.style.transform = \`rotate(\${obj.angle || 0}rad)\`;
         }
 
-        // Timer Formatting & Controls
-        function formatTime(seconds) {
-          const m = Math.floor(seconds / 60).toString().padStart(2, '0');
-          const s = (seconds % 60).toString().padStart(2, '0');
-          return \`\${m}:\${s}\`;
-        }
-
-        timerSet5.onclick = () => {
-          if (socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ type: 'timer_control', action: 'start', duration: 300 }));
-          }
-        };
-
-        timerSet10.onclick = () => {
-          if (socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ type: 'timer_control', action: 'start', duration: 600 }));
-          }
-        };
-
-        timerToggle.onclick = () => {
-          if (socket.readyState === WebSocket.OPEN) {
-            if (isTimerRunning) {
-              socket.send(JSON.stringify({ type: 'timer_control', action: 'pause' }));
-            } else {
-              if (localRemainingSeconds > 0) {
-                socket.send(JSON.stringify({ type: 'timer_control', action: 'start', duration: localRemainingSeconds }));
-              } else {
-                socket.send(JSON.stringify({ type: 'timer_control', action: 'start', duration: 300 }));
-              }
-            }
-          }
-        };
-
-        timerReset.onclick = () => {
-          if (socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ type: 'timer_control', action: 'reset' }));
-          }
-        };
-
-        // Version History Functions
-        snapshotBtn.onclick = () => {
-          const label = prompt("Enter a label for this version snapshot:", "Snapshot " + new Date().toLocaleTimeString());
-          if (label && socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ type: 'save_snapshot', label }));
-          }
-        };
-
+        // Version History Modal Controls
         historyBtn.onclick = () => {
           historyModal.style.display = 'flex';
         };
@@ -919,14 +800,6 @@ app.get('/', (req, res) => {
             
             rebuildFromHistory(message.history);
             renderHistoryList(message.versionHistory);
-
-            if (message.timer) {
-              localRemainingSeconds = message.timer.remainingSeconds;
-              isTimerRunning = message.timer.isRunning;
-              timerDisplay.innerText = formatTime(localRemainingSeconds);
-              timerToggle.innerText = isTimerRunning ? 'Pause' : 'Start';
-            }
-
             resizeCanvases();
           } 
           else if (message.type === 'user_joined') {
@@ -973,15 +846,6 @@ app.get('/', (req, res) => {
           else if (message.type === 'update_history') {
             rebuildFromHistory(message.history);
           }
-          else if (message.type === 'timer_update') {
-            localRemainingSeconds = message.remaining;
-            isTimerRunning = message.isRunning;
-            timerDisplay.innerText = formatTime(localRemainingSeconds);
-            timerToggle.innerText = isTimerRunning ? 'Pause' : 'Start';
-          }
-          else if (message.type === 'timer_finished') {
-            alert('⏰ Countdown Timer Finished!');
-          }
           else if (message.type === 'update_snapshots') {
             renderHistoryList(message.snapshots);
           }
@@ -1022,7 +886,6 @@ wss.on('connection', (ws) => {
     history: drawHistory, 
     media: mediaStore,
     versionHistory,
-    timer: timerState,
     users: connectedUsers 
   }));
 
@@ -1110,26 +973,6 @@ wss.on('connection', (ws) => {
           }
         });
       }
-    }
-    else if (data.type === 'timer_control') {
-      if (data.action === 'start') {
-        startTimer(data.duration);
-      } else if (data.action === 'pause') {
-        pauseTimer();
-      } else if (data.action === 'reset') {
-        resetTimer();
-      }
-    }
-    else if (data.type === 'save_snapshot') {
-      const snapshot = {
-        id: Math.random().toString(36).substring(2, 10),
-        label: data.label || 'Snapshot',
-        timestamp: new Date().toLocaleTimeString(),
-        drawHistory: JSON.parse(JSON.stringify(drawHistory)),
-        mediaStore: JSON.parse(JSON.stringify(mediaStore))
-      };
-      versionHistory.unshift(snapshot);
-      broadcast({ type: 'update_snapshots', snapshots: versionHistory });
     }
     else if (data.type === 'restore_snapshot') {
       const snap = versionHistory.find(s => s.id === data.id);
