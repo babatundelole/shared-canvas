@@ -7,7 +7,7 @@ const wss = new WebSocketServer({ server });
 
 let drawHistory = [];
 let mediaStore = [];
-let voiceNotes = []; // Stores spatial voice notes
+let voiceNotes = [];
 const connectedUsers = {};
 
 function getRandomColor() {
@@ -24,7 +24,7 @@ app.get('/', (req, res) => {
     <!DOCTYPE html>
     <html>
     <head>
-      <title>Shared Canvas with Spatial Voice Memos</title>
+      <title>Shared Canvas with Animated Voice Waveforms</title>
       <style>
         body { margin: 0; background: #111; overflow: hidden; font-family: sans-serif; transition: background 0.3s; }
         body.theme-light { background: #f4f4f9; }
@@ -57,18 +57,18 @@ app.get('/', (req, res) => {
           pointer-events: none;
         }
 
-        /* Voice Note Tiles */
+        /* Voice Note Tiles with Waveform Canvas */
         .voice-note-tile {
           position: absolute;
-          width: 220px;
-          height: 60px;
+          width: 260px;
+          height: 64px;
           background: rgba(20, 20, 25, 0.92);
           border: 1px solid #00ffcc;
-          border-radius: 30px;
+          border-radius: 32px;
           display: flex;
           align-items: center;
           padding: 0 12px;
-          gap: 10px;
+          gap: 8px;
           box-shadow: 0 6px 16px rgba(0,0,0,0.6);
           pointer-events: auto;
           user-select: none;
@@ -116,9 +116,10 @@ app.get('/', (req, res) => {
           text-overflow: ellipsis;
         }
 
-        .voice-time {
-          font-size: 10px;
-          color: #aaa;
+        .waveform-canvas {
+          width: 120px;
+          height: 24px;
+          background: transparent;
         }
 
         .voice-delete-btn {
@@ -282,6 +283,9 @@ app.get('/', (req, res) => {
         let audioChunks = [];
         let isRecording = false;
 
+        // Shared Web Audio Context
+        let audioCtx = null;
+
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
         const socket = new WebSocket(\`\${protocol}//\${location.host}\`);
 
@@ -351,7 +355,6 @@ app.get('/', (req, res) => {
             }
           });
 
-          // Sync voice note positions to DOM
           voiceNoteObjects.forEach(v => updateVoiceNoteDOMElement(v));
 
           for (const uid in userLayers) {
@@ -364,11 +367,9 @@ app.get('/', (req, res) => {
           mainCtx.lineWidth = 2;
           mainCtx.strokeRect(-obj.w / 2, -obj.h / 2, obj.w, obj.h);
 
-          // Resize handle
           mainCtx.fillStyle = '#00ffcc';
           mainCtx.fillRect(obj.w / 2 - HANDLE_SIZE, obj.h / 2 - HANDLE_SIZE, HANDLE_SIZE, HANDLE_SIZE);
 
-          // Rotate handle
           mainCtx.beginPath();
           mainCtx.moveTo(0, -obj.h / 2);
           mainCtx.lineTo(0, -obj.h / 2 - ROTATE_HANDLE_OFFSET);
@@ -415,20 +416,93 @@ app.get('/', (req, res) => {
           playBtn.className = 'voice-play-btn';
           playBtn.innerText = '▶';
 
+          const waveCanvas = document.createElement('canvas');
+          waveCanvas.className = 'waveform-canvas';
+          waveCanvas.width = 120;
+          waveCanvas.height = 24;
+          const waveCtx = waveCanvas.getContext('2d');
+
+          // Pre-render static equalizer bars
+          drawStaticWaveform(waveCtx, 120, 24);
+
           const audio = new Audio(vData.audioSrc);
+          audio.crossOrigin = "anonymous";
+
+          let analyser = null;
+          let source = null;
+          let animFrame = null;
+
+          function drawStaticWaveform(ctx, w, h) {
+            ctx.clearRect(0, 0, w, h);
+            ctx.fillStyle = 'rgba(0, 255, 204, 0.3)';
+            const barWidth = 3;
+            const gap = 2;
+            const numBars = Math.floor(w / (barWidth + gap));
+
+            for (let i = 0; i < numBars; i++) {
+              const barHeight = Math.sin(i * 0.4) * (h / 3) + (h / 2.5);
+              ctx.fillRect(i * (barWidth + gap), (h - barHeight) / 2, barWidth, barHeight);
+            }
+          }
+
+          function renderLiveWaveform() {
+            if (!analyser) return;
+
+            const bufferLength = analyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+            analyser.getByteFrequencyData(dataArray);
+
+            waveCtx.clearRect(0, 0, waveCanvas.width, waveCanvas.height);
+
+            const barWidth = 3;
+            const gap = 2;
+            const numBars = Math.floor(waveCanvas.width / (barWidth + gap));
+            const step = Math.floor(bufferLength / numBars);
+
+            for (let i = 0; i < numBars; i++) {
+              const value = dataArray[i * step] || 0;
+              const barHeight = Math.max(3, (value / 255) * waveCanvas.height);
+
+              waveCtx.fillStyle = '#00ffcc';
+              waveCtx.fillRect(i * (barWidth + gap), (waveCanvas.height - barHeight) / 2, barWidth, barHeight);
+            }
+
+            animFrame = requestAnimationFrame(renderLiveWaveform);
+          }
 
           playBtn.onclick = () => {
+            if (!audioCtx) {
+              audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+
+            if (audioCtx.state === 'suspended') {
+              audioCtx.resume();
+            }
+
             if (audio.paused) {
+              if (!source) {
+                source = audioCtx.createMediaElementSource(audio);
+                analyser = audioCtx.createAnalyser();
+                analyser.fftSize = 64;
+                source.connect(analyser);
+                analyser.connect(audioCtx.destination);
+              }
+
               audio.play();
               playBtn.innerText = '⏸';
+              renderLiveWaveform();
             } else {
               audio.pause();
               playBtn.innerText = '▶';
+              cancelAnimationFrame(animFrame);
+              drawStaticWaveform(waveCtx, waveCanvas.width, waveCanvas.height);
             }
           };
 
           audio.onended = () => {
             playBtn.innerText = '▶';
+            cancelAnimationFrame(animFrame);
+            drawStaticWaveform(waveCtx, waveCanvas.width, waveCanvas.height);
           };
 
           const info = document.createElement('div');
@@ -438,12 +512,8 @@ app.get('/', (req, res) => {
           userTag.className = 'voice-user';
           userTag.innerText = vData.userName || 'User Note';
 
-          const timeTag = document.createElement('div');
-          timeTag.className = 'voice-time';
-          timeTag.innerText = vData.duration ? vData.duration + 's Voice Note' : 'Voice Memo';
-
           info.appendChild(userTag);
-          info.appendChild(timeTag);
+          info.appendChild(waveCanvas);
 
           tile.appendChild(playBtn);
           tile.appendChild(info);
@@ -478,7 +548,7 @@ app.get('/', (req, res) => {
           }
         }
 
-        // Voice Recording Logic
+        // Voice Recorder Logic
         recordVoiceBtn.addEventListener('click', async () => {
           if (!isRecording) {
             try {
@@ -500,9 +570,8 @@ app.get('/', (req, res) => {
                     ownerId: myUserId,
                     userName: 'User ' + myUserId.substring(0, 4),
                     audioSrc: base64Audio,
-                    x: Math.max(50, Math.min(window.innerWidth - 250, (remoteCursors[myUserId]?.x || 100))),
-                    y: Math.max(50, Math.min(window.innerHeight - 100, (remoteCursors[myUserId]?.y || 100))),
-                    duration: Math.round(audioChunks.length * 0.5)
+                    x: Math.max(50, Math.min(window.innerWidth - 280, (remoteCursors[myUserId]?.x || 100))),
+                    y: Math.max(50, Math.min(window.innerHeight - 100, (remoteCursors[myUserId]?.y || 100)))
                   };
 
                   voiceNoteObjects.push(newVoiceNote);
