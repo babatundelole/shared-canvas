@@ -32,10 +32,11 @@ app.get('/', (req, res) => {
         }
         
         button {
-          background: #e74c3c; color: white; border: none; padding: 6px 12px;
-          border-radius: 4px; font-weight: bold; cursor: pointer; transition: background 0.2s;
+          background: #333; color: white; border: 1px solid #555; padding: 6px 12px;
+          border-radius: 4px; font-weight: bold; cursor: pointer; transition: all 0.2s;
         }
-        button:hover { background: #c0392b; }
+        button:hover { background: #444; }
+        button.active { background: #e74c3c; border-color: #ff6b6b; }
 
         .control-group { display: flex; align-items: center; gap: 6px; }
       </style>
@@ -49,9 +50,9 @@ app.get('/', (req, res) => {
         </div>
         <div class="control-group">
           <label for="brushSize">Size:</label>
-          <input type="range" id="brushSize" min="2" max="30" value="6">
+          <input type="range" id="brushSize" min="2" max="40" value="8">
         </div>
-        <button id="clearBtn">Clear Canvas</button>
+        <button id="eraseBtn">Eraser: OFF</button>
       </div>
 
       <canvas id="paint"></canvas>
@@ -62,10 +63,13 @@ app.get('/', (req, res) => {
         const ctx = canvas.getContext('2d');
         const colorPicker = document.getElementById('colorPicker');
         const brushSize = document.getElementById('brushSize');
-        const clearBtn = document.getElementById('clearBtn');
+        const eraseBtn = document.getElementById('eraseBtn');
 
         canvas.width = window.innerWidth;
         canvas.height = window.innerHeight;
+
+        const BG_COLOR = '#111111';
+        let isEraserMode = false;
 
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
         const socket = new WebSocket(\`\${protocol}//\${location.host}\`);
@@ -93,25 +97,29 @@ app.get('/', (req, res) => {
           }
         }
 
-        function clearScreen() {
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
+        function getCurrentColor() {
+          return isEraserMode ? BG_COLOR : colorPicker.value;
         }
 
         canvas.addEventListener('mousedown', (e) => { 
           drawing = true; 
-          drawPoint(e.clientX, e.clientY, colorPicker.value, brushSize.value); 
+          drawPoint(e.clientX, e.clientY, getCurrentColor(), brushSize.value); 
         });
         
         canvas.addEventListener('mousemove', (e) => { 
-          if (drawing) drawPoint(e.clientX, e.clientY, colorPicker.value, brushSize.value); 
+          if (drawing) drawPoint(e.clientX, e.clientY, getCurrentColor(), brushSize.value); 
         });
         
         window.addEventListener('mouseup', () => drawing = false);
 
-        clearBtn.addEventListener('click', () => {
-          clearScreen();
-          if (socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ type: 'clear' }));
+        eraseBtn.addEventListener('click', () => {
+          isEraserMode = !isEraserMode;
+          if (isEraserMode) {
+            eraseBtn.innerText = "Eraser: ON";
+            eraseBtn.classList.add('active');
+          } else {
+            eraseBtn.innerText = "Eraser: OFF";
+            eraseBtn.classList.remove('active');
           }
         });
 
@@ -119,14 +127,10 @@ app.get('/', (req, res) => {
           const message = JSON.parse(e.data);
 
           if (message.type === 'history') {
-            clearScreen();
             message.data.forEach(pt => drawPoint(pt.x, pt.y, pt.color, pt.size, false));
           } 
           else if (message.type === 'draw') {
             drawPoint(message.x, message.y, message.color, message.size, false);
-          }
-          else if (message.type === 'clear') {
-            clearScreen();
           }
         };
       </script>
@@ -146,14 +150,6 @@ wss.on('connection', (ws) => {
       wss.clients.forEach((client) => {
         if (client !== ws && client.readyState === 1) {
           client.send(JSON.stringify(data));
-        }
-      });
-    } 
-    else if (data.type === 'clear') {
-      drawHistory = []; // Empty global history on server
-      wss.clients.forEach((client) => {
-        if (client.readyState === 1) {
-          client.send(JSON.stringify({ type: 'clear' }));
         }
       });
     }
