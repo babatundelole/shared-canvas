@@ -24,7 +24,7 @@ app.get('/', (req, res) => {
     <!DOCTYPE html>
     <html>
     <head>
-      <title>Shared Canvas with Playable Video & Audio Sync</title>
+      <title>Shared Canvas with Silent Playable Video & Image Transforms</title>
       <style>
         body { margin: 0; background: #111; overflow: hidden; font-family: sans-serif; transition: background 0.3s; }
         body.theme-light { background: #f4f4f9; }
@@ -43,7 +43,7 @@ app.get('/', (req, res) => {
         .canvas-video-wrapper {
           position: absolute;
           transform-origin: center center;
-          pointer-events: auto;
+          pointer-events: none;
           box-sizing: border-box;
         }
 
@@ -54,10 +54,7 @@ app.get('/', (req, res) => {
           display: block;
           object-fit: cover;
           background: #000;
-        }
-
-        .canvas-video-wrapper.selected {
-          outline: 2px solid #00ffcc;
+          pointer-events: none;
         }
 
         #toolbar {
@@ -285,8 +282,6 @@ app.get('/', (req, res) => {
           mainCtx.fill();
         }
 
-        let isSelfVideoAction = false;
-
         function updateVideoDOMElement(obj) {
           let wrapper = document.getElementById('video_wrapper_' + obj.id);
           if (!wrapper) {
@@ -296,28 +291,15 @@ app.get('/', (req, res) => {
 
             const video = document.createElement('video');
             video.src = obj.src;
-            video.controls = true;      // Video control bar with play/pause/volume
-            video.muted = false;        // Audio ENABLED
-            video.autoplay = false;
+            video.muted = true;         // Completely silent
+            video.autoplay = true;      // Auto-plays
+            video.loop = true;          // Continuous playback
             video.playsInline = true;
-
-            video.onplay = () => {
-              if (isSelfVideoAction) return;
-              syncVideoState(obj.id, 'play', video.currentTime);
-            };
-
-            video.onpause = () => {
-              if (isSelfVideoAction) return;
-              syncVideoState(obj.id, 'pause', video.currentTime);
-            };
-
-            video.onseeked = () => {
-              if (isSelfVideoAction) return;
-              syncVideoState(obj.id, 'seek', video.currentTime);
-            };
 
             wrapper.appendChild(video);
             videoContainer.appendChild(wrapper);
+            
+            video.play().catch(e => console.log('Autoplay blocked:', e));
           }
 
           wrapper.style.left = obj.x + 'px';
@@ -325,23 +307,6 @@ app.get('/', (req, res) => {
           wrapper.style.width = obj.w + 'px';
           wrapper.style.height = obj.h + 'px';
           wrapper.style.transform = \`rotate(\${obj.angle || 0}rad)\`;
-
-          if (obj === selectedMedia && obj.ownerId === myUserId) {
-            wrapper.classList.add('selected');
-          } else {
-            wrapper.classList.remove('selected');
-          }
-        }
-
-        function syncVideoState(id, action, time) {
-          if (socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({
-              type: 'video_control',
-              id,
-              action,
-              time
-            }));
-          }
         }
 
         function renderCursors() {
@@ -808,25 +773,6 @@ app.get('/', (req, res) => {
           else if (message.type === 'delete_media') {
             removeMediaById(message.id);
           }
-          else if (message.type === 'video_control') {
-            const wrapper = document.getElementById('video_wrapper_' + message.id);
-            if (wrapper) {
-              const video = wrapper.querySelector('video');
-              if (video) {
-                isSelfVideoAction = true;
-                if (Math.abs(video.currentTime - message.time) > 0.3) {
-                  video.currentTime = message.time;
-                }
-                if (message.action === 'play') {
-                  video.play().catch(err => console.log(err));
-                }
-                if (message.action === 'pause') {
-                  video.pause();
-                }
-                setTimeout(() => { isSelfVideoAction = false; }, 100);
-              }
-            }
-          }
           else if (message.type === 'update_history') {
             rebuildFromHistory(message.history);
           }
@@ -944,13 +890,6 @@ wss.on('connection', (ws) => {
           }
         });
       }
-    }
-    else if (data.type === 'video_control') {
-      wss.clients.forEach((client) => {
-        if (client !== ws && client.readyState === 1) {
-          client.send(JSON.stringify(data));
-        }
-      });
     }
     else if (data.type === 'undo') {
       const removed = drawHistory.filter(item => item.strokeId === data.strokeId);
