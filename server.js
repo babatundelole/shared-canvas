@@ -24,7 +24,7 @@ app.get('/', (req, res) => {
     <!DOCTYPE html>
     <html>
     <head>
-      <title>Shared Canvas with Playable Video (Muted Audio)</title>
+      <title>Shared Canvas with Playable Video</title>
       <style>
         body { margin: 0; background: #111; overflow: hidden; font-family: sans-serif; transition: background 0.3s; }
         body.theme-light { background: #f4f4f9; }
@@ -43,7 +43,7 @@ app.get('/', (req, res) => {
         .canvas-video-wrapper {
           position: absolute;
           transform-origin: center center;
-          pointer-events: auto;
+          pointer-events: none;
           box-sizing: border-box;
         }
 
@@ -54,6 +54,7 @@ app.get('/', (req, res) => {
           display: block;
           object-fit: cover;
           background: #000;
+          pointer-events: auto;
         }
 
         .canvas-video-wrapper.selected {
@@ -297,9 +298,18 @@ app.get('/', (req, res) => {
             const video = document.createElement('video');
             video.src = obj.src;
             video.controls = true;
-            video.muted = true;          // Audio MUTED by default
+            video.muted = true;
             video.autoplay = false;
             video.playsInline = true;
+
+            // Ensure video click selects it without blocking controls
+            video.addEventListener('mousedown', (e) => {
+              if (obj.ownerId === myUserId) {
+                selectedMedia = obj;
+                updateDeleteBtnVisibility();
+                requestRender();
+              }
+            });
 
             video.onplay = () => {
               if (isSelfVideoAction) return;
