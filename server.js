@@ -467,7 +467,14 @@ app.get('/', (req, res) => {
           }
         }
 
+        // Prevent browser context menu on canvas right-click
+        mainCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
+        cursorCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
         mainCanvas.addEventListener('mousedown', (e) => {
+          // Ignore clicks that are NOT left click
+          if (e.button !== 0) return;
+
           const x = e.clientX;
           const y = e.clientY;
 
