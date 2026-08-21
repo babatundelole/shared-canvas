@@ -41,7 +41,7 @@ app.get('/', (req, res) => {
 
         .canvas-video-wrapper {
           position: absolute;
-          transform-origin: center center;
+          transform-origin: 0 0;
           pointer-events: none;
           box-sizing: border-box;
         }
@@ -80,6 +80,7 @@ app.get('/', (req, res) => {
         #deleteMediaBtn:hover { background: #e74c3c; }
         input[type="file"] { display: none; }
         .control-group { display: flex; align-items: center; gap: 4px; }
+        #zoomLevel { font-size: 11px; color: #aaa; font-weight: bold; }
       </style>
     </head>
     <body>
@@ -99,6 +100,7 @@ app.get('/', (req, res) => {
         <button id="eraseBtn">Eraser: OFF</button>
         <button id="undoBtn">Undo</button>
         <button id="redoBtn">Redo</button>
+        <button id="resetViewBtn">Reset View (100%)</button>
 
         <div class="control-group">
           <select id="bgSelect">
@@ -135,10 +137,31 @@ app.get('/', (req, res) => {
         const eraseBtn = document.getElementById('eraseBtn');
         const undoBtn = document.getElementById('undoBtn');
         const redoBtn = document.getElementById('redoBtn');
+        const resetViewBtn = document.getElementById('resetViewBtn');
         const bgSelect = document.getElementById('bgSelect');
         const imgUpload = document.getElementById('imgUpload');
         const videoUpload = document.getElementById('videoUpload');
         const deleteMediaBtn = document.getElementById('deleteMediaBtn');
+
+        // Transform Matrix (Pan & Zoom) State
+        let transform = { x: 0, y: 0, scale: 1 };
+        let isPanning = false;
+        let isSpacePressed = false;
+        let panStart = { x: 0, y: 0 };
+
+        function screenToWorld(screenX, screenY) {
+          return {
+            x: (screenX - transform.x) / transform.scale,
+            y: (screenY - transform.y) / transform.scale
+          };
+        }
+
+        function worldToScreen(worldX, worldY) {
+          return {
+            x: worldX * transform.scale + transform.x,
+            y: worldY * transform.scale + transform.y
+          };
+        }
 
         function resizeCanvases() {
           mainCanvas.width = window.innerWidth;
@@ -191,8 +214,8 @@ app.get('/', (req, res) => {
         function getUserLayer(userId) {
           if (!userLayers[userId]) {
             const canvas = document.createElement('canvas');
-            canvas.width = mainCanvas.width;
-            canvas.height = mainCanvas.height;
+            canvas.width = 8000;
+            canvas.height = 8000;
             const ctx = canvas.getContext('2d');
             userLayers[userId] = { canvas, ctx };
           }
@@ -213,6 +236,10 @@ app.get('/', (req, res) => {
         function flattenLayersToMain() {
           renderScheduled = false;
           mainCtx.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
+
+          mainCtx.save();
+          mainCtx.translate(transform.x, transform.y);
+          mainCtx.scale(transform.scale, transform.scale);
           
           mediaObjects.forEach(obj => {
             if (obj.mediaType === 'image' && obj.imgElement && obj.imgElement.complete) {
@@ -247,23 +274,26 @@ app.get('/', (req, res) => {
           for (const uid in userLayers) {
             mainCtx.drawImage(userLayers[uid].canvas, 0, 0);
           }
+
+          mainCtx.restore();
         }
 
         function drawSelectionControls(obj) {
           mainCtx.strokeStyle = '#00ffcc';
-          mainCtx.lineWidth = 2;
+          mainCtx.lineWidth = 2 / transform.scale;
           mainCtx.strokeRect(-obj.w / 2, -obj.h / 2, obj.w, obj.h);
 
           mainCtx.fillStyle = '#00ffcc';
-          mainCtx.fillRect(obj.w / 2 - HANDLE_SIZE, obj.h / 2 - HANDLE_SIZE, HANDLE_SIZE, HANDLE_SIZE);
+          const size = HANDLE_SIZE / transform.scale;
+          mainCtx.fillRect(obj.w / 2 - size, obj.h / 2 - size, size, size);
 
           mainCtx.beginPath();
           mainCtx.moveTo(0, -obj.h / 2);
-          mainCtx.lineTo(0, -obj.h / 2 - ROTATE_HANDLE_OFFSET);
+          mainCtx.lineTo(0, -obj.h / 2 - (ROTATE_HANDLE_OFFSET / transform.scale));
           mainCtx.stroke();
 
           mainCtx.beginPath();
-          mainCtx.arc(0, -obj.h / 2 - ROTATE_HANDLE_OFFSET, 6, 0, Math.PI * 2);
+          mainCtx.arc(0, -obj.h / 2 - (ROTATE_HANDLE_OFFSET / transform.scale), 6 / transform.scale, 0, Math.PI * 2);
           mainCtx.fill();
         }
 
@@ -287,10 +317,11 @@ app.get('/', (req, res) => {
             video.play().catch(e => console.log('Autoplay blocked:', e));
           }
 
-          wrapper.style.left = obj.x + 'px';
-          wrapper.style.top = obj.y + 'px';
-          wrapper.style.width = obj.w + 'px';
-          wrapper.style.height = obj.h + 'px';
+          const screenPos = worldToScreen(obj.x, obj.y);
+          wrapper.style.left = screenPos.x + 'px';
+          wrapper.style.top = screenPos.y + 'px';
+          wrapper.style.width = (obj.w * transform.scale) + 'px';
+          wrapper.style.height = (obj.h * transform.scale) + 'px';
           wrapper.style.transform = \`rotate(\${obj.angle || 0}rad)\`;
         }
 
@@ -302,8 +333,10 @@ app.get('/', (req, res) => {
             const cursor = remoteCursors[uid];
             if (cursor.x === undefined || cursor.y === undefined) continue;
 
+            const screenPos = worldToScreen(cursor.x, cursor.y);
+
             cursorCtx.save();
-            cursorCtx.translate(cursor.x, cursor.y);
+            cursorCtx.translate(screenPos.x, screenPos.y);
 
             cursorCtx.beginPath();
             cursorCtx.moveTo(0, 0);
@@ -362,7 +395,7 @@ app.get('/', (req, res) => {
 
         function clearAllLayers() {
           for (const uid in userLayers) {
-            userLayers[uid].ctx.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
+            userLayers[uid].ctx.clearRect(0, 0, userLayers[uid].canvas.width, userLayers[uid].canvas.height);
           }
         }
 
@@ -429,14 +462,16 @@ app.get('/', (req, res) => {
 
         function getHitHandle(obj, worldX, worldY) {
           const local = toLocalCoords(obj, worldX, worldY);
+          const scaledHandleSize = HANDLE_SIZE / transform.scale;
+          const scaledRotateOffset = ROTATE_HANDLE_OFFSET / transform.scale;
           
-          if (local.x >= obj.w / 2 - HANDLE_SIZE && local.x <= obj.w / 2 + 5 &&
-              local.y >= obj.h / 2 - HANDLE_SIZE && local.y <= obj.h / 2 + 5) {
+          if (local.x >= obj.w / 2 - scaledHandleSize && local.x <= obj.w / 2 + (5 / transform.scale) &&
+              local.y >= obj.h / 2 - scaledHandleSize && local.y <= obj.h / 2 + (5 / transform.scale)) {
             return 'resize';
           }
           
-          const rotY = -obj.h / 2 - ROTATE_HANDLE_OFFSET;
-          if (Math.hypot(local.x - 0, local.y - rotY) <= 12) {
+          const rotY = -obj.h / 2 - scaledRotateOffset;
+          if (Math.hypot(local.x - 0, local.y - rotY) <= (12 / transform.scale)) {
             return 'rotate';
           }
 
@@ -457,22 +492,51 @@ app.get('/', (req, res) => {
           return null;
         }
 
-        function sendCursorPosition(x, y) {
+        function sendCursorPosition(worldX, worldY) {
           const now = Date.now();
           if (now - lastCursorSend > 30) {
             if (socket.readyState === WebSocket.OPEN) {
-              socket.send(JSON.stringify({ type: 'cursor_move', x, y }));
+              socket.send(JSON.stringify({ type: 'cursor_move', x: worldX, y: worldY }));
             }
             lastCursorSend = now;
           }
         }
 
+        // Zoom Handling
+        mainCanvas.addEventListener('wheel', (e) => {
+          e.preventDefault();
+          const zoomFactor = 1.1;
+          const mouseX = e.clientX;
+          const mouseY = e.clientY;
+
+          let newScale = e.deltaY < 0 ? transform.scale * zoomFactor : transform.scale / zoomFactor;
+          newScale = Math.min(Math.max(0.1, newScale), 10);
+
+          transform.x = mouseX - (mouseX - transform.x) * (newScale / transform.scale);
+          transform.y = mouseY - (mouseY - transform.y) * (newScale / transform.scale);
+          transform.scale = newScale;
+
+          resetViewBtn.innerText = \`Reset View (\${Math.round(transform.scale * 100)}%)\`;
+          requestRender();
+          renderCursors();
+        }, { passive: false });
+
         mainCanvas.addEventListener('mousedown', (e) => {
-          const x = e.clientX;
-          const y = e.clientY;
+          // Pan with Middle Click (button 1) or Spacebar + Left Click
+          if (e.button === 1 || (isSpacePressed && e.button === 0)) {
+            isPanning = true;
+            panStart = { x: e.clientX - transform.x, y: e.clientY - transform.y };
+            return;
+          }
+
+          if (e.button !== 0) return;
+
+          const screenX = e.clientX;
+          const screenY = e.clientY;
+          const worldPos = screenToWorld(screenX, screenY);
 
           if (selectedMedia && selectedMedia.ownerId === myUserId) {
-            const handle = getHitHandle(selectedMedia, x, y);
+            const handle = getHitHandle(selectedMedia, worldPos.x, worldPos.y);
             if (handle) {
               dragMode = handle;
               isDragging = true;
@@ -480,12 +544,12 @@ app.get('/', (req, res) => {
             }
           }
 
-          const hitMedia = getHitMedia(x, y);
+          const hitMedia = getHitMedia(worldPos.x, worldPos.y);
           if (hitMedia) {
             selectedMedia = hitMedia;
             dragMode = 'move';
             isDragging = true;
-            dragOffset = { x: x - selectedMedia.x, y: y - selectedMedia.y };
+            dragOffset = { x: worldPos.x - selectedMedia.x, y: worldPos.y - selectedMedia.y };
             updateDeleteBtnVisibility();
             requestRender();
             return;
@@ -501,26 +565,35 @@ app.get('/', (req, res) => {
           currentStrokeId = Math.random().toString(36).substring(2, 10);
           undoStack.push(currentStrokeId);
           redoStack.length = 0;
-          lastPos = { x, y };
+          lastPos = worldPos;
           handlePointerMove(e);
         });
 
         function handlePointerMove(e) {
-          const x = e.clientX;
-          const y = e.clientY;
+          if (isPanning) {
+            transform.x = e.clientX - panStart.x;
+            transform.y = e.clientY - panStart.y;
+            requestRender();
+            renderCursors();
+            return;
+          }
 
-          sendCursorPosition(x, y);
+          const screenX = e.clientX;
+          const screenY = e.clientY;
+          const worldPos = screenToWorld(screenX, screenY);
+
+          sendCursorPosition(worldPos.x, worldPos.y);
 
           if (dragMode === 'move' && selectedMedia && selectedMedia.ownerId === myUserId) {
-            selectedMedia.x = x - dragOffset.x;
-            selectedMedia.y = y - dragOffset.y;
+            selectedMedia.x = worldPos.x - dragOffset.x;
+            selectedMedia.y = worldPos.y - dragOffset.y;
             requestRender();
             syncMediaUpdateThrottled(selectedMedia);
             return;
           }
 
           if (dragMode === 'resize' && selectedMedia && selectedMedia.ownerId === myUserId) {
-            const local = toLocalCoords(selectedMedia, x, y);
+            const local = toLocalCoords(selectedMedia, worldPos.x, worldPos.y);
             selectedMedia.w = Math.max(50, local.x * 2);
             selectedMedia.h = Math.max(50, local.y * 2);
             requestRender();
@@ -531,7 +604,7 @@ app.get('/', (req, res) => {
           if (dragMode === 'rotate' && selectedMedia && selectedMedia.ownerId === myUserId) {
             const cx = selectedMedia.x + selectedMedia.w / 2;
             const cy = selectedMedia.y + selectedMedia.h / 2;
-            selectedMedia.angle = Math.atan2(y - cy, x - cx) + Math.PI / 2;
+            selectedMedia.angle = Math.atan2(worldPos.y - cy, worldPos.x - cx) + Math.PI / 2;
             requestRender();
             syncMediaUpdateThrottled(selectedMedia);
             return;
@@ -539,7 +612,7 @@ app.get('/', (req, res) => {
 
           if (!drawing) return;
 
-          const currentPos = { x, y };
+          const currentPos = worldPos;
           if (!lastPos) lastPos = currentPos;
 
           const size = parseInt(brushSize.value);
@@ -564,6 +637,10 @@ app.get('/', (req, res) => {
         mainCanvas.addEventListener('mousemove', handlePointerMove);
 
         window.addEventListener('mouseup', () => {
+          if (isPanning) {
+            isPanning = false;
+            return;
+          }
           if (dragMode && selectedMedia && selectedMedia.ownerId === myUserId) {
             syncMediaUpdate(selectedMedia);
           }
@@ -600,12 +677,13 @@ app.get('/', (req, res) => {
           if (file) {
             const reader = new FileReader();
             reader.onload = (event) => {
+              const center = screenToWorld(window.innerWidth / 2, window.innerHeight / 2);
               const newMediaData = {
                 id: Math.random().toString(36).substring(2, 10),
                 ownerId: myUserId,
                 mediaType: 'image',
                 src: event.target.result,
-                x: 100, y: 100,
+                x: center.x - 100, y: center.y - 100,
                 w: 200, h: 200,
                 angle: 0
               };
@@ -628,12 +706,13 @@ app.get('/', (req, res) => {
           if (file) {
             const reader = new FileReader();
             reader.onload = (event) => {
+              const center = screenToWorld(window.innerWidth / 2, window.innerHeight / 2);
               const newMediaData = {
                 id: Math.random().toString(36).substring(2, 10),
                 ownerId: myUserId,
                 mediaType: 'video',
                 src: event.target.result,
-                x: 150, y: 150,
+                x: center.x - 160, y: center.y - 120,
                 w: 320, h: 240,
                 angle: 0
               };
@@ -674,7 +753,15 @@ app.get('/', (req, res) => {
         undoBtn.addEventListener('click', triggerUndo);
         redoBtn.addEventListener('click', triggerRedo);
 
+        resetViewBtn.addEventListener('click', () => {
+          transform = { x: 0, y: 0, scale: 1 };
+          resetViewBtn.innerText = "Reset View (100%)";
+          requestRender();
+          renderCursors();
+        });
+
         window.addEventListener('keydown', (e) => {
+          if (e.code === 'Space') { isSpacePressed = true; }
           if (e.key === 'Delete' || e.key === 'Backspace') {
             if (selectedMedia && selectedMedia.ownerId === myUserId) {
               e.preventDefault();
@@ -683,6 +770,10 @@ app.get('/', (req, res) => {
           }
           if (e.ctrlKey && e.key === 'z') { e.preventDefault(); triggerUndo(); }
           if (e.ctrlKey && e.key === 'y') { e.preventDefault(); triggerRedo(); }
+        });
+
+        window.addEventListener('keyup', (e) => {
+          if (e.code === 'Space') { isSpacePressed = false; }
         });
 
         bgSelect.addEventListener('change', (e) => {
