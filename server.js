@@ -109,12 +109,12 @@ app.get('/', (req, res) => {
 
         const userLayers = {};
         
-        // Image object management
-        let imageObjects = []; // Array of { id, src, x, y, w, h, imgElement }
+        let imageObjects = []; // Array of { id, src, x, y, w, h, angle, imgElement }
         let selectedImg = null;
-        let dragMode = null; // 'move' or 'resize'
+        let dragMode = null; // 'move', 'resize', or 'rotate'
         let dragOffset = { x: 0, y: 0 };
         const HANDLE_SIZE = 10;
+        const ROTATE_HANDLE_OFFSET = 30;
 
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
         const socket = new WebSocket(\`\${protocol}//\${location.host}\`);
@@ -143,24 +143,39 @@ app.get('/', (req, res) => {
         function flattenLayersToMain() {
           mainCtx.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
           
-          // 1. Draw images on bottom layer
           imageObjects.forEach(obj => {
             if (obj.imgElement && obj.imgElement.complete) {
-              mainCtx.drawImage(obj.imgElement, obj.x, obj.y, obj.w, obj.h);
-              
-              // Draw selection boundary & resize handle for the active image
+              mainCtx.save();
+              const cx = obj.x + obj.w / 2;
+              const cy = obj.y + obj.h / 2;
+              mainCtx.translate(cx, cy);
+              mainCtx.rotate(obj.angle || 0);
+
+              mainCtx.drawImage(obj.imgElement, -obj.w / 2, -obj.h / 2, obj.w, obj.h);
+
               if (obj === selectedImg) {
                 mainCtx.strokeStyle = '#00ffcc';
                 mainCtx.lineWidth = 2;
-                mainCtx.strokeRect(obj.x, obj.y, obj.w, obj.h);
+                mainCtx.strokeRect(-obj.w / 2, -obj.h / 2, obj.w, obj.h);
 
+                // Resize handle (Bottom-Right)
                 mainCtx.fillStyle = '#00ffcc';
-                mainCtx.fillRect(obj.x + obj.w - HANDLE_SIZE, obj.y + obj.h - HANDLE_SIZE, HANDLE_SIZE, HANDLE_SIZE);
+                mainCtx.fillRect(obj.w / 2 - HANDLE_SIZE, obj.h / 2 - HANDLE_SIZE, HANDLE_SIZE, HANDLE_SIZE);
+
+                // Rotate handle (Top-Center stem & circle)
+                mainCtx.beginPath();
+                mainCtx.moveTo(0, -obj.h / 2);
+                mainCtx.lineTo(0, -obj.h / 2 - ROTATE_HANDLE_OFFSET);
+                mainCtx.stroke();
+
+                mainCtx.beginPath();
+                mainCtx.arc(0, -obj.h / 2 - ROTATE_HANDLE_OFFSET, 6, 0, Math.PI * 2);
+                mainCtx.fill();
               }
+              mainCtx.restore();
             }
           });
 
-          // 2. Overlay user drawing layers on top
           for (const uid in userLayers) {
             mainCtx.drawImage(userLayers[uid].canvas, 0, 0);
           }
@@ -208,11 +223,10 @@ app.get('/', (req, res) => {
           flattenLayersToMain();
         }
 
-        // Image Handling Functions
         function addImageToCanvas(imgData) {
           const img = new Image();
           img.src = imgData.src;
-          const obj = { ...imgData, imgElement: img };
+          const obj = { angle: 0, ...imgData, imgElement: img };
           
           img.onload = () => {
             imageObjects.push(obj);
@@ -220,31 +234,58 @@ app.get('/', (req, res) => {
           };
         }
 
-        function getHitHandle(obj, x, y) {
-          const hX = obj.x + obj.w - HANDLE_SIZE;
-          const hY = obj.y + obj.h - HANDLE_SIZE;
-          return x >= hX && x <= hX + HANDLE_SIZE && y >= hY && y <= hY + HANDLE_SIZE;
+        function toLocalCoords(obj, worldX, worldY) {
+          const cx = obj.x + obj.w / 2;
+          const cy = obj.y + obj.h / 2;
+          const rad = -(obj.angle || 0);
+          const dx = worldX - cx;
+          const dy = worldY - cy;
+          return {
+            x: dx * Math.cos(rad) - dy * Math.sin(rad),
+            y: dx * Math.sin(rad) + dy * Math.cos(rad)
+          };
         }
 
-        function getHitImage(x, y) {
+        function getHitHandle(obj, worldX, worldY) {
+          const local = toLocalCoords(obj, worldX, worldY);
+          
+          // Resize handle (bottom right)
+          if (local.x >= obj.w / 2 - HANDLE_SIZE && local.x <= obj.w / 2 &&
+              local.y >= obj.h / 2 - HANDLE_SIZE && local.y <= obj.h / 2) {
+            return 'resize';
+          }
+          
+          // Rotate handle (top center)
+          const rotY = -obj.h / 2 - ROTATE_HANDLE_OFFSET;
+          if (Math.hypot(local.x - 0, local.y - rotY) <= 10) {
+            return 'rotate';
+          }
+
+          return null;
+        }
+
+        function getHitImage(worldX, worldY) {
           for (let i = imageObjects.length - 1; i >= 0; i--) {
             const obj = imageObjects[i];
-            if (x >= obj.x && x <= obj.x + obj.w && y >= obj.y && y <= obj.y + obj.h) {
+            const local = toLocalCoords(obj, worldX, worldY);
+            if (local.x >= -obj.w / 2 && local.x <= obj.w / 2 &&
+                local.y >= -obj.h / 2 && local.y <= obj.h / 2) {
               return obj;
             }
           }
           return null;
         }
 
-        // Mouse Event Handling
         mainCanvas.addEventListener('mousedown', (e) => {
           const x = e.clientX;
           const y = e.clientY;
 
-          // Check if clicking resize handle or existing image
-          if (selectedImg && getHitHandle(selectedImg, x, y)) {
-            dragMode = 'resize';
-            return;
+          if (selectedImg) {
+            const handle = getHitHandle(selectedImg, x, y);
+            if (handle) {
+              dragMode = handle;
+              return;
+            }
           }
 
           const hitImg = getHitImage(x, y);
@@ -256,13 +297,11 @@ app.get('/', (req, res) => {
             return;
           }
 
-          // Deselect image if clicking outside
           if (selectedImg) {
             selectedImg = null;
             flattenLayersToMain();
           }
 
-          // Otherwise start drawing
           drawing = true;
           currentStrokeId = Math.random().toString(36).substring(2, 10);
           undoStack.push(currentStrokeId);
@@ -284,8 +323,18 @@ app.get('/', (req, res) => {
           }
 
           if (dragMode === 'resize' && selectedImg) {
-            selectedImg.w = Math.max(30, x - selectedImg.x);
-            selectedImg.h = Math.max(30, y - selectedImg.y);
+            const local = toLocalCoords(selectedImg, x, y);
+            selectedImg.w = Math.max(30, local.x * 2);
+            selectedImg.h = Math.max(30, local.y * 2);
+            flattenLayersToMain();
+            syncImageUpdate(selectedImg);
+            return;
+          }
+
+          if (dragMode === 'rotate' && selectedImg) {
+            const cx = selectedImg.x + selectedImg.w / 2;
+            const cy = selectedImg.y + selectedImg.h / 2;
+            selectedImg.angle = Math.atan2(y - cy, x - cx) + Math.PI / 2;
             flattenLayersToMain();
             syncImageUpdate(selectedImg);
             return;
@@ -331,12 +380,12 @@ app.get('/', (req, res) => {
               x: imgObj.x,
               y: imgObj.y,
               w: imgObj.w,
-              h: imgObj.h
+              h: imgObj.h,
+              angle: imgObj.angle
             }));
           }
         }
 
-        // Image Upload Event
         imgUpload.addEventListener('change', (e) => {
           const file = e.target.files[0];
           if (file) {
@@ -346,7 +395,8 @@ app.get('/', (req, res) => {
                 id: Math.random().toString(36).substring(2, 10),
                 src: event.target.result,
                 x: 100, y: 100,
-                w: 200, h: 200
+                w: 200, h: 200,
+                angle: 0
               };
 
               addImageToCanvas(newImgData);
@@ -360,7 +410,6 @@ app.get('/', (req, res) => {
           }
         });
 
-        // Undo & Redo Handlers
         function triggerUndo() {
           if (undoStack.length === 0) return;
           const strokeIdToUndo = undoStack.pop();
@@ -406,7 +455,6 @@ app.get('/', (req, res) => {
           if (message.type === 'init') {
             myUserId = message.userId;
             
-            // Load persistent images
             if (message.images) {
               message.images.forEach(img => addImageToCanvas(img));
             }
@@ -428,6 +476,7 @@ app.get('/', (req, res) => {
               target.y = message.y;
               target.w = message.w;
               target.h = message.h;
+              target.angle = message.angle;
               flattenLayersToMain();
             }
           }
@@ -486,6 +535,7 @@ wss.on('connection', (ws) => {
         target.y = data.y;
         target.w = data.w;
         target.h = data.h;
+        target.angle = data.angle;
       }
 
       wss.clients.forEach((client) => {
