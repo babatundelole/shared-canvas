@@ -7,7 +7,6 @@ const wss = new WebSocketServer({ server });
 
 let drawHistory = [];
 let mediaStore = [];
-let versionHistory = []; // Kept snapshot storage for history view
 const connectedUsers = {};
 
 function getRandomColor() {
@@ -17,13 +16,6 @@ function getRandomColor() {
     color += letters[Math.floor(Math.random() * 16)];
   }
   return color;
-}
-
-function broadcast(data) {
-  const payload = JSON.stringify(data);
-  wss.clients.forEach(client => {
-    if (client.readyState === 1) client.send(payload);
-  });
 }
 
 app.get('/', (req, res) => {
@@ -84,26 +76,6 @@ app.get('/', (req, res) => {
         button:hover, label.btn:hover, select:hover { background: #444; }
         button.active { background: #e74c3c; border-color: #ff6b6b; }
 
-        /* Version History Modal */
-        #historyModal {
-          display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-          background: rgba(0, 0, 0, 0.8); z-index: 100;
-          justify-content: center; align-items: center;
-        }
-        .modal-content {
-          background: #1e1e24; border: 1px solid #444; width: 500px; max-height: 80vh;
-          border-radius: 12px; padding: 20px; color: #fff; display: flex; flex-direction: column; gap: 15px;
-        }
-        .modal-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; padding-bottom: 10px; }
-        .modal-title { font-size: 16px; font-weight: bold; color: #00ffcc; }
-        .close-btn { background: none; border: none; color: #888; font-size: 18px; cursor: pointer; }
-        .history-list { overflow-y: auto; display: flex; flex-direction: column; gap: 8px; max-height: 400px; }
-        .history-item {
-          background: #2a2a32; padding: 10px; border-radius: 6px; display: flex;
-          justify-content: space-between; align-items: center; border: 1px solid #3d3d4a;
-        }
-        .history-item:hover { border-color: #00ffcc; }
-
         #deleteMediaBtn { background: #c0392b; border-color: #e74c3c; display: none; }
         #deleteMediaBtn:hover { background: #e74c3c; }
         input[type="file"] { display: none; }
@@ -142,21 +114,7 @@ app.get('/', (req, res) => {
         <label for="videoUpload" class="btn">Add Video File</label>
         <input type="file" id="videoUpload" accept="video/*">
 
-        <button id="historyBtn">📜 Version History</button>
         <button id="deleteMediaBtn">Delete Selected</button>
-      </div>
-
-      <!-- Version History Modal -->
-      <div id="historyModal">
-        <div class="modal-content">
-          <div class="modal-header">
-            <div class="modal-title">Canvas Version History</div>
-            <button class="close-btn" id="closeHistoryModal">✖</button>
-          </div>
-          <div class="history-list" id="historyList">
-            <div style="color: #888; text-align: center;">No snapshots saved yet.</div>
-          </div>
-        </div>
       </div>
 
       <div id="overlayContainer"></div>
@@ -181,12 +139,6 @@ app.get('/', (req, res) => {
         const imgUpload = document.getElementById('imgUpload');
         const videoUpload = document.getElementById('videoUpload');
         const deleteMediaBtn = document.getElementById('deleteMediaBtn');
-
-        // Version History DOM Elements
-        const historyBtn = document.getElementById('historyBtn');
-        const historyModal = document.getElementById('historyModal');
-        const closeHistoryModal = document.getElementById('closeHistoryModal');
-        const historyList = document.getElementById('historyList');
 
         function resizeCanvases() {
           mainCanvas.width = window.innerWidth;
@@ -340,46 +292,6 @@ app.get('/', (req, res) => {
           wrapper.style.width = obj.w + 'px';
           wrapper.style.height = obj.h + 'px';
           wrapper.style.transform = \`rotate(\${obj.angle || 0}rad)\`;
-        }
-
-        // Version History Modal Controls
-        historyBtn.onclick = () => {
-          historyModal.style.display = 'flex';
-        };
-
-        closeHistoryModal.onclick = () => {
-          historyModal.style.display = 'none';
-        };
-
-        function renderHistoryList(snapshots) {
-          historyList.innerHTML = '';
-          if (!snapshots || snapshots.length === 0) {
-            historyList.innerHTML = '<div style="color: #888; text-align: center;">No snapshots saved yet.</div>';
-            return;
-          }
-
-          snapshots.forEach((snap) => {
-            const item = document.createElement('div');
-            item.className = 'history-item';
-
-            const details = document.createElement('div');
-            details.innerHTML = \`<strong style="color:#00ffcc;">\${snap.label}</strong><br><small style="color:#888;">\${snap.timestamp}</small>\`;
-
-            const restoreBtn = document.createElement('button');
-            restoreBtn.innerText = 'Restore';
-            restoreBtn.onclick = () => {
-              if (confirm(\`Restore version "\${snap.label}"?\`)) {
-                if (socket.readyState === WebSocket.OPEN) {
-                  socket.send(JSON.stringify({ type: 'restore_snapshot', id: snap.id }));
-                  historyModal.style.display = 'none';
-                }
-              }
-            };
-
-            item.appendChild(details);
-            item.appendChild(restoreBtn);
-            historyList.appendChild(item);
-          });
         }
 
         function renderCursors() {
@@ -799,7 +711,6 @@ app.get('/', (req, res) => {
             }
             
             rebuildFromHistory(message.history);
-            renderHistoryList(message.versionHistory);
             resizeCanvases();
           } 
           else if (message.type === 'user_joined') {
@@ -846,18 +757,6 @@ app.get('/', (req, res) => {
           else if (message.type === 'update_history') {
             rebuildFromHistory(message.history);
           }
-          else if (message.type === 'update_snapshots') {
-            renderHistoryList(message.snapshots);
-          }
-          else if (message.type === 'board_restored') {
-            mediaObjects.forEach(m => {
-              const wrapper = document.getElementById('video_wrapper_' + m.id);
-              if (wrapper) wrapper.remove();
-            });
-            mediaObjects = [];
-            if (message.media) message.media.forEach(m => addMediaToCanvas(m));
-            rebuildFromHistory(message.history);
-          }
         };
       </script>
     </body>
@@ -885,7 +784,6 @@ wss.on('connection', (ws) => {
     userId, 
     history: drawHistory, 
     media: mediaStore,
-    versionHistory,
     users: connectedUsers 
   }));
 
@@ -972,14 +870,6 @@ wss.on('connection', (ws) => {
             client.send(JSON.stringify(data));
           }
         });
-      }
-    }
-    else if (data.type === 'restore_snapshot') {
-      const snap = versionHistory.find(s => s.id === data.id);
-      if (snap) {
-        drawHistory = JSON.parse(JSON.stringify(snap.drawHistory));
-        mediaStore = JSON.parse(JSON.stringify(snap.mediaStore));
-        broadcast({ type: 'board_restored', history: drawHistory, media: mediaStore });
       }
     }
     else if (data.type === 'undo') {
