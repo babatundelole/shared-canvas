@@ -7,6 +7,7 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
 let drawHistory = [];
+let imageStore = [];
 
 app.get('/', (req, res) => {
   res.send(`
@@ -47,6 +48,14 @@ app.get('/', (req, res) => {
         }
         button:hover, label.btn:hover, select:hover { background: #444; }
         button.active { background: #e74c3c; border-color: #ff6b6b; }
+        
+        #deleteImgBtn {
+          background: #c0392b;
+          border-color: #e74c3c;
+          display: none; /* Hidden by default until an image is selected */
+        }
+        #deleteImgBtn:hover { background: #e74c3c; }
+
         input[type="file"] { display: none; }
 
         .control-group { display: flex; align-items: center; gap: 4px; }
@@ -79,6 +88,8 @@ app.get('/', (req, res) => {
 
         <label for="imgUpload" class="btn">Add Image</label>
         <input type="file" id="imgUpload" accept="image/*">
+        
+        <button id="deleteImgBtn">Delete Image</button>
       </div>
 
       <canvas id="mainCanvas"></canvas>
@@ -94,6 +105,7 @@ app.get('/', (req, res) => {
         const redoBtn = document.getElementById('redoBtn');
         const bgSelect = document.getElementById('bgSelect');
         const imgUpload = document.getElementById('imgUpload');
+        const deleteImgBtn = document.getElementById('deleteImgBtn');
 
         mainCanvas.width = window.innerWidth;
         mainCanvas.height = window.innerHeight;
@@ -112,7 +124,7 @@ app.get('/', (req, res) => {
         let imageObjects = [];
         let selectedImg = null;
         let dragMode = null;
-        let isDragging = false; // Lock flag to stop jitter during manipulation
+        let isDragging = false;
         let dragOffset = { x: 0, y: 0 };
         const HANDLE_SIZE = 12;
         const ROTATE_HANDLE_OFFSET = 30;
@@ -149,6 +161,10 @@ app.get('/', (req, res) => {
             renderScheduled = true;
             requestAnimationFrame(flattenLayersToMain);
           }
+        }
+
+        function updateDeleteBtnVisibility() {
+          deleteImgBtn.style.display = selectedImg ? 'inline-block' : 'none';
         }
 
         function flattenLayersToMain() {
@@ -246,6 +262,25 @@ app.get('/', (req, res) => {
           };
         }
 
+        function removeImageById(id) {
+          if (selectedImg && selectedImg.id === id) {
+            selectedImg = null;
+            updateDeleteBtnVisibility();
+          }
+          imageObjects = imageObjects.filter(img => img.id !== id);
+          requestRender();
+        }
+
+        function deleteSelectedImage() {
+          if (!selectedImg) return;
+          const idToDelete = selectedImg.id;
+          removeImageById(idToDelete);
+
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'delete_image', id: idToDelete }));
+          }
+        }
+
         function toLocalCoords(obj, worldX, worldY) {
           const cx = obj.x + obj.w / 2;
           const cy = obj.y + obj.h / 2;
@@ -305,12 +340,14 @@ app.get('/', (req, res) => {
             dragMode = 'move';
             isDragging = true;
             dragOffset = { x: x - selectedImg.x, y: y - selectedImg.y };
+            updateDeleteBtnVisibility();
             requestRender();
             return;
           }
 
           if (selectedImg) {
             selectedImg = null;
+            updateDeleteBtnVisibility();
             requestRender();
           }
 
@@ -390,7 +427,7 @@ app.get('/', (req, res) => {
 
         function syncImageUpdateThrottled(imgObj) {
           const now = Date.now();
-          if (now - lastNetworkSend > 40) { // Throttled to ~25fps over network to avoid flooding
+          if (now - lastNetworkSend > 40) {
             syncImageUpdate(imgObj);
             lastNetworkSend = now;
           }
@@ -425,6 +462,7 @@ app.get('/', (req, res) => {
 
               addImageToCanvas(newImgData);
               selectedImg = imageObjects[imageObjects.length - 1];
+              updateDeleteBtnVisibility();
 
               if (socket.readyState === WebSocket.OPEN) {
                 socket.send(JSON.stringify({ type: 'add_image', image: newImgData }));
@@ -432,7 +470,10 @@ app.get('/', (req, res) => {
             };
             reader.readAsDataURL(file);
           }
+          e.target.value = ''; // Reset file input so re-selecting the same file works
         });
+
+        deleteImgBtn.addEventListener('click', deleteSelectedImage);
 
         function triggerUndo() {
           if (undoStack.length === 0) return;
@@ -456,6 +497,12 @@ app.get('/', (req, res) => {
         redoBtn.addEventListener('click', triggerRedo);
 
         window.addEventListener('keydown', (e) => {
+          if (e.key === 'Delete' || e.key === 'Backspace') {
+            if (selectedImg) {
+              e.preventDefault();
+              deleteSelectedImage();
+            }
+          }
           if (e.ctrlKey && e.key === 'z') { e.preventDefault(); triggerUndo(); }
           if (e.ctrlKey && e.key === 'y') { e.preventDefault(); triggerRedo(); }
         });
@@ -494,7 +541,6 @@ app.get('/', (req, res) => {
             addImageToCanvas(message.image);
           }
           else if (message.type === 'update_image') {
-            // Ignore network updates for the image YOU are currently dragging to avoid glitching
             if (isDragging && selectedImg && selectedImg.id === message.id) return;
 
             const target = imageObjects.find(img => img.id === message.id);
@@ -507,6 +553,9 @@ app.get('/', (req, res) => {
               requestRender();
             }
           }
+          else if (message.type === 'delete_image') {
+            removeImageById(message.id);
+          }
           else if (message.type === 'update_history') {
             rebuildFromHistory(message.history);
           }
@@ -517,7 +566,6 @@ app.get('/', (req, res) => {
   `);
 });
 
-let imageStore = [];
 let undoneHistory = [];
 
 wss.on('connection', (ws) => {
@@ -565,6 +613,14 @@ wss.on('connection', (ws) => {
         target.angle = data.angle;
       }
 
+      wss.clients.forEach((client) => {
+        if (client !== ws && client.readyState === 1) {
+          client.send(JSON.stringify(data));
+        }
+      });
+    }
+    else if (data.type === 'delete_image') {
+      imageStore = imageStore.filter(img => img.id !== data.id);
       wss.clients.forEach((client) => {
         if (client !== ws && client.readyState === 1) {
           client.send(JSON.stringify(data));
