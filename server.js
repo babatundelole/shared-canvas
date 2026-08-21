@@ -962,17 +962,9 @@ app.get('/', (req, res) => {
         mainCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
         cursorCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
-        let spacePressed = false;
-        window.addEventListener('keydown', (e) => {
-          if (e.code === 'Space') spacePressed = true;
-        });
-        window.addEventListener('keyup', (e) => {
-          if (e.code === 'Space') spacePressed = false;
-        });
-
         mainCanvas.addEventListener('mousedown', (e) => {
-          // Pan canvas with Middle Click or Spacebar + Left Click
-          if (e.button === 1 || (e.button === 0 && spacePressed)) {
+          // Pan canvas with Right Click (button 2)
+          if (e.button === 2) {
             isPanning = true;
             panStart = { x: e.clientX - camera.x, y: e.clientY - camera.y };
             stopFollowing();
@@ -1350,7 +1342,6 @@ wss.on('connection', (ws, req) => {
   const roomId = url.searchParams.get('room') || 'main';
   const providedPass = url.searchParams.get('pass') || null;
 
-  // If room exists and has a password, verify password
   if (rooms[roomId] && rooms[roomId].password && rooms[roomId].password !== providedPass) {
     ws.send(JSON.stringify({ type: 'error', message: 'Incorrect room password.' }));
     ws.close();
