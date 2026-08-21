@@ -46,12 +46,7 @@ app.get('/', (req, res) => {
       <style>
         body { margin: 0; background: #111; overflow: hidden; font-family: sans-serif; }
         body.theme-light { background: #f4f4f9; }
-        body.theme-grid { 
-          background-color: #111;
-          background-image: linear-gradient(rgba(255,255,255,0.05) 1px, transparent 1px),
-                            linear-gradient(90deg, rgba(255,255,255,0.05) 1px, transparent 1px);
-          background-size: 20px 20px;
-        }
+        body.theme-grid { background-color: #111; }
 
         canvas { display: block; position: absolute; top: 0; left: 0; }
         #mainCanvas { z-index: 2; }
@@ -378,7 +373,6 @@ app.get('/', (req, res) => {
           renderCursors();
         });
 
-        // Screen to World Conversion
         function screenToWorld(sx, sy) {
           return {
             x: (sx - camera.x) / camera.zoom,
@@ -386,7 +380,6 @@ app.get('/', (req, res) => {
           };
         }
 
-        // World to Screen Conversion
         function worldToScreen(wx, wy) {
           return {
             x: wx * camera.zoom + camera.x,
@@ -442,7 +435,6 @@ app.get('/', (req, res) => {
           status.style.color = "#ff0000";
         };
 
-        // Profile Setup
         saveProfileBtn.addEventListener('click', () => {
           if (modalNameInput.value.trim()) {
             myName = modalNameInput.value.trim();
@@ -465,7 +457,6 @@ app.get('/', (req, res) => {
           profileModal.style.display = 'flex';
         });
 
-        // User List & Follow Mode
         userBadge.addEventListener('click', () => {
           userListMenu.style.display = userListMenu.style.display === 'flex' ? 'none' : 'flex';
           updateUserListMenu();
@@ -514,7 +505,6 @@ app.get('/', (req, res) => {
           }
         }
 
-        // Mouse Wheel Zoom
         window.addEventListener('wheel', (e) => {
           if (e.target.closest('#toolbar') || e.target.closest('#chatDrawer') || e.target.closest('#gameWidget')) return;
           e.preventDefault();
@@ -534,7 +524,6 @@ app.get('/', (req, res) => {
           renderCursors();
         }, { passive: false });
 
-        // Chat Toggle & Messaging
         chatHeader.addEventListener('click', () => {
           chatDrawer.classList.toggle('collapsed');
           if (!chatDrawer.classList.contains('collapsed')) {
@@ -582,7 +571,6 @@ app.get('/', (req, res) => {
           }
         }
 
-        // Tic-Tac-Toe Game
         const toggleGameBtn = document.getElementById('toggleGameBtn');
         const gameWidget = document.getElementById('gameWidget');
         const gameHeader = document.getElementById('gameHeader');
@@ -671,13 +659,16 @@ app.get('/', (req, res) => {
           }
         }
 
+        // Expanded infinite offscreen layer creation
         function getUserLayer(userId) {
           if (!userLayers[userId]) {
             const canvas = document.createElement('canvas');
-            canvas.width = mainCanvas.width;
-            canvas.height = mainCanvas.height;
+            canvas.width = 10000;
+            canvas.height = 10000;
             const ctx = canvas.getContext('2d');
-            userLayers[userId] = { canvas, ctx };
+            // Offset drawing coordinates to center of canvas space so users can draw infinitely in all directions
+            ctx.translate(5000, 5000);
+            userLayers[userId] = { canvas, ctx, offsetX: 5000, offsetY: 5000 };
           }
           return userLayers[userId];
         }
@@ -697,6 +688,27 @@ app.get('/', (req, res) => {
           renderScheduled = false;
           mainCtx.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
           
+          // Render Infinite Grid Background if grid theme is chosen
+          if (bgSelect.value === 'grid') {
+            mainCtx.save();
+            const gridSize = 20 * camera.zoom;
+            const offsetX = camera.x % gridSize;
+            const offsetY = camera.y % gridSize;
+            mainCtx.strokeStyle = 'rgba(255,255,255,0.05)';
+            mainCtx.lineWidth = 1;
+            mainCtx.beginPath();
+            for (let x = offsetX; x < mainCanvas.width; x += gridSize) {
+              mainCtx.moveTo(x, 0);
+              mainCtx.lineTo(x, mainCanvas.height);
+            }
+            for (let y = offsetY; y < mainCanvas.height; y += gridSize) {
+              mainCtx.moveTo(0, y);
+              mainCtx.lineTo(mainCanvas.width, y);
+            }
+            mainCtx.stroke();
+            mainCtx.restore();
+          }
+
           mainCtx.save();
           mainCtx.translate(camera.x, camera.y);
           mainCtx.scale(camera.zoom, camera.zoom);
@@ -732,7 +744,8 @@ app.get('/', (req, res) => {
           });
 
           for (const uid in userLayers) {
-            mainCtx.drawImage(userLayers[uid].canvas, 0, 0);
+            const layer = userLayers[uid];
+            mainCtx.drawImage(layer.canvas, -layer.offsetX, -layer.offsetY);
           }
 
           mainCtx.restore();
@@ -854,7 +867,8 @@ app.get('/', (req, res) => {
 
         function clearAllLayers() {
           for (const uid in userLayers) {
-            userLayers[uid].ctx.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
+            const layer = userLayers[uid];
+            layer.ctx.clearRect(-layer.offsetX, -layer.offsetY, layer.canvas.width, layer.canvas.height);
           }
         }
 
@@ -963,7 +977,6 @@ app.get('/', (req, res) => {
         cursorCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
         mainCanvas.addEventListener('mousedown', (e) => {
-          // Pan canvas with Right Click (button 2)
           if (e.button === 2) {
             isPanning = true;
             panStart = { x: e.clientX - camera.x, y: e.clientY - camera.y };
@@ -1205,6 +1218,7 @@ app.get('/', (req, res) => {
           if (e.target.value !== 'dark') {
             document.body.classList.add('theme-' + e.target.value);
           }
+          requestRender();
         });
 
         eraseBtn.addEventListener('click', () => {
