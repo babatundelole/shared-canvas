@@ -112,12 +112,12 @@ app.get('/', (req, res) => {
         let imageObjects = [];
         let selectedImg = null;
         let dragMode = null;
+        let isDragging = false; // Lock flag to stop jitter during manipulation
         let dragOffset = { x: 0, y: 0 };
         const HANDLE_SIZE = 12;
         const ROTATE_HANDLE_OFFSET = 30;
 
-        // Render & Network Throttling variables
-        let renderRequested = false;
+        let renderScheduled = false;
         let lastNetworkSend = 0;
 
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -144,16 +144,15 @@ app.get('/', (req, res) => {
           return userLayers[userId];
         }
 
-        // Render loop scheduled with requestAnimationFrame to prevent lag
         function requestRender() {
-          if (!renderRequested) {
-            renderRequested = true;
+          if (!renderScheduled) {
+            renderScheduled = true;
             requestAnimationFrame(flattenLayersToMain);
           }
         }
 
         function flattenLayersToMain() {
-          renderRequested = false;
+          renderScheduled = false;
           mainCtx.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
           
           imageObjects.forEach(obj => {
@@ -295,6 +294,7 @@ app.get('/', (req, res) => {
             const handle = getHitHandle(selectedImg, x, y);
             if (handle) {
               dragMode = handle;
+              isDragging = true;
               return;
             }
           }
@@ -303,6 +303,7 @@ app.get('/', (req, res) => {
           if (hitImg) {
             selectedImg = hitImg;
             dragMode = 'move';
+            isDragging = true;
             dragOffset = { x: x - selectedImg.x, y: y - selectedImg.y };
             requestRender();
             return;
@@ -379,18 +380,17 @@ app.get('/', (req, res) => {
 
         window.addEventListener('mouseup', () => {
           if (dragMode && selectedImg) {
-            // Guarantee final exact state is sent on release
             syncImageUpdate(selectedImg);
           }
           drawing = false;
+          isDragging = false;
           dragMode = null;
           lastPos = null;
         });
 
-        // Throttle WebSocket updates to 30ms intervals during active drag
         function syncImageUpdateThrottled(imgObj) {
           const now = Date.now();
-          if (now - lastNetworkSend > 30) {
+          if (now - lastNetworkSend > 40) { // Throttled to ~25fps over network to avoid flooding
             syncImageUpdate(imgObj);
             lastNetworkSend = now;
           }
@@ -494,6 +494,9 @@ app.get('/', (req, res) => {
             addImageToCanvas(message.image);
           }
           else if (message.type === 'update_image') {
+            // Ignore network updates for the image YOU are currently dragging to avoid glitching
+            if (isDragging && selectedImg && selectedImg.id === message.id) return;
+
             const target = imageObjects.find(img => img.id === message.id);
             if (target) {
               target.x = message.x;
