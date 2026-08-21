@@ -52,7 +52,7 @@ app.get('/', (req, res) => {
         #deleteImgBtn {
           background: #c0392b;
           border-color: #e74c3c;
-          display: none; /* Hidden by default until an image is selected */
+          display: none;
         }
         #deleteImgBtn:hover { background: #e74c3c; }
 
@@ -164,7 +164,7 @@ app.get('/', (req, res) => {
         }
 
         function updateDeleteBtnVisibility() {
-          deleteImgBtn.style.display = selectedImg ? 'inline-block' : 'none';
+          deleteImgBtn.style.display = (selectedImg && selectedImg.ownerId === myUserId) ? 'inline-block' : 'none';
         }
 
         function flattenLayersToMain() {
@@ -181,7 +181,7 @@ app.get('/', (req, res) => {
 
               mainCtx.drawImage(obj.imgElement, -obj.w / 2, -obj.h / 2, obj.w, obj.h);
 
-              if (obj === selectedImg) {
+              if (obj === selectedImg && obj.ownerId === myUserId) {
                 mainCtx.strokeStyle = '#00ffcc';
                 mainCtx.lineWidth = 2;
                 mainCtx.strokeRect(-obj.w / 2, -obj.h / 2, obj.w, obj.h);
@@ -272,7 +272,7 @@ app.get('/', (req, res) => {
         }
 
         function deleteSelectedImage() {
-          if (!selectedImg) return;
+          if (!selectedImg || selectedImg.ownerId !== myUserId) return;
           const idToDelete = selectedImg.id;
           removeImageById(idToDelete);
 
@@ -312,6 +312,9 @@ app.get('/', (req, res) => {
         function getHitImage(worldX, worldY) {
           for (let i = imageObjects.length - 1; i >= 0; i--) {
             const obj = imageObjects[i];
+            // Only consider hit if current user owns the image
+            if (obj.ownerId !== myUserId) continue;
+
             const local = toLocalCoords(obj, worldX, worldY);
             if (local.x >= -obj.w / 2 && local.x <= obj.w / 2 &&
                 local.y >= -obj.h / 2 && local.y <= obj.h / 2) {
@@ -325,7 +328,7 @@ app.get('/', (req, res) => {
           const x = e.clientX;
           const y = e.clientY;
 
-          if (selectedImg) {
+          if (selectedImg && selectedImg.ownerId === myUserId) {
             const handle = getHitHandle(selectedImg, x, y);
             if (handle) {
               dragMode = handle;
@@ -363,7 +366,7 @@ app.get('/', (req, res) => {
           const x = e.clientX;
           const y = e.clientY;
 
-          if (dragMode === 'move' && selectedImg) {
+          if (dragMode === 'move' && selectedImg && selectedImg.ownerId === myUserId) {
             selectedImg.x = x - dragOffset.x;
             selectedImg.y = y - dragOffset.y;
             requestRender();
@@ -371,7 +374,7 @@ app.get('/', (req, res) => {
             return;
           }
 
-          if (dragMode === 'resize' && selectedImg) {
+          if (dragMode === 'resize' && selectedImg && selectedImg.ownerId === myUserId) {
             const local = toLocalCoords(selectedImg, x, y);
             selectedImg.w = Math.max(30, local.x * 2);
             selectedImg.h = Math.max(30, local.y * 2);
@@ -380,7 +383,7 @@ app.get('/', (req, res) => {
             return;
           }
 
-          if (dragMode === 'rotate' && selectedImg) {
+          if (dragMode === 'rotate' && selectedImg && selectedImg.ownerId === myUserId) {
             const cx = selectedImg.x + selectedImg.w / 2;
             const cy = selectedImg.y + selectedImg.h / 2;
             selectedImg.angle = Math.atan2(y - cy, x - cx) + Math.PI / 2;
@@ -416,7 +419,7 @@ app.get('/', (req, res) => {
         mainCanvas.addEventListener('mousemove', handlePointerMove);
 
         window.addEventListener('mouseup', () => {
-          if (dragMode && selectedImg) {
+          if (dragMode && selectedImg && selectedImg.ownerId === myUserId) {
             syncImageUpdate(selectedImg);
           }
           drawing = false;
@@ -434,7 +437,7 @@ app.get('/', (req, res) => {
         }
 
         function syncImageUpdate(imgObj) {
-          if (socket.readyState === WebSocket.OPEN) {
+          if (socket.readyState === WebSocket.OPEN && imgObj.ownerId === myUserId) {
             socket.send(JSON.stringify({
               type: 'update_image',
               id: imgObj.id,
@@ -454,6 +457,7 @@ app.get('/', (req, res) => {
             reader.onload = (event) => {
               const newImgData = {
                 id: Math.random().toString(36).substring(2, 10),
+                ownerId: myUserId,
                 src: event.target.result,
                 x: 100, y: 100,
                 w: 200, h: 200,
@@ -470,7 +474,7 @@ app.get('/', (req, res) => {
             };
             reader.readAsDataURL(file);
           }
-          e.target.value = ''; // Reset file input so re-selecting the same file works
+          e.target.value = '';
         });
 
         deleteImgBtn.addEventListener('click', deleteSelectedImage);
@@ -498,7 +502,7 @@ app.get('/', (req, res) => {
 
         window.addEventListener('keydown', (e) => {
           if (e.key === 'Delete' || e.key === 'Backspace') {
-            if (selectedImg) {
+            if (selectedImg && selectedImg.ownerId === myUserId) {
               e.preventDefault();
               deleteSelectedImage();
             }
@@ -596,6 +600,8 @@ wss.on('connection', (ws) => {
       });
     } 
     else if (data.type === 'add_image') {
+      // Server ensures ownerId is tagged correctly
+      data.image.ownerId = userId;
       imageStore.push(data.image);
       wss.clients.forEach((client) => {
         if (client !== ws && client.readyState === 1) {
@@ -605,27 +611,32 @@ wss.on('connection', (ws) => {
     }
     else if (data.type === 'update_image') {
       const target = imageStore.find(img => img.id === data.id);
-      if (target) {
+      // Validate ownership on backend before applying move/resize
+      if (target && target.ownerId === userId) {
         target.x = data.x;
         target.y = data.y;
         target.w = data.w;
         target.h = data.h;
         target.angle = data.angle;
-      }
 
-      wss.clients.forEach((client) => {
-        if (client !== ws && client.readyState === 1) {
-          client.send(JSON.stringify(data));
-        }
-      });
+        wss.clients.forEach((client) => {
+          if (client !== ws && client.readyState === 1) {
+            client.send(JSON.stringify(data));
+          }
+        });
+      }
     }
     else if (data.type === 'delete_image') {
-      imageStore = imageStore.filter(img => img.id !== data.id);
-      wss.clients.forEach((client) => {
-        if (client !== ws && client.readyState === 1) {
-          client.send(JSON.stringify(data));
-        }
-      });
+      const target = imageStore.find(img => img.id === data.id);
+      // Validate ownership on backend before deleting
+      if (target && target.ownerId === userId) {
+        imageStore = imageStore.filter(img => img.id !== data.id);
+        wss.clients.forEach((client) => {
+          if (client !== ws && client.readyState === 1) {
+            client.send(JSON.stringify(data));
+          }
+        });
+      }
     }
     else if (data.type === 'undo') {
       const removed = drawHistory.filter(item => item.strokeId === data.strokeId);
