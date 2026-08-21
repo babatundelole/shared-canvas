@@ -7,8 +7,15 @@ const wss = new WebSocketServer({ server });
 
 let drawHistory = [];
 let mediaStore = [];
-let voiceNotes = [];
+let versionHistory = []; // Snapshots of board states
 const connectedUsers = {};
+
+// Timer State
+let timerState = {
+  remainingSeconds: 0,
+  isRunning: false,
+  timerInterval: null
+};
 
 function getRandomColor() {
   const letters = '0123456789ABCDEF';
@@ -19,12 +26,51 @@ function getRandomColor() {
   return color;
 }
 
+function broadcast(data) {
+  const payload = JSON.stringify(data);
+  wss.clients.forEach(client => {
+    if (client.readyState === 1) client.send(payload);
+  });
+}
+
+function startTimer(seconds) {
+  if (timerState.timerInterval) clearInterval(timerState.timerInterval);
+  timerState.remainingSeconds = seconds;
+  timerState.isRunning = true;
+
+  broadcast({ type: 'timer_update', remaining: timerState.remainingSeconds, isRunning: true });
+
+  timerState.timerInterval = setInterval(() => {
+    timerState.remainingSeconds--;
+    if (timerState.remainingSeconds <= 0) {
+      clearInterval(timerState.timerInterval);
+      timerState.isRunning = false;
+      timerState.remainingSeconds = 0;
+      broadcast({ type: 'timer_finished' });
+    }
+    broadcast({ type: 'timer_update', remaining: timerState.remainingSeconds, isRunning: timerState.isRunning });
+  }, 1000);
+}
+
+function pauseTimer() {
+  if (timerState.timerInterval) clearInterval(timerState.timerInterval);
+  timerState.isRunning = false;
+  broadcast({ type: 'timer_update', remaining: timerState.remainingSeconds, isRunning: false });
+}
+
+function resetTimer() {
+  if (timerState.timerInterval) clearInterval(timerState.timerInterval);
+  timerState.isRunning = false;
+  timerState.remainingSeconds = 0;
+  broadcast({ type: 'timer_update', remaining: 0, isRunning: false });
+}
+
 app.get('/', (req, res) => {
   res.send(`
     <!DOCTYPE html>
     <html>
     <head>
-      <title>Shared Canvas with Animated Voice Waveforms</title>
+      <title>Collaborative Canvas with Timer & Version History</title>
       <style>
         body { margin: 0; background: #111; overflow: hidden; font-family: sans-serif; transition: background 0.3s; }
         body.theme-light { background: #f4f4f9; }
@@ -48,88 +94,7 @@ app.get('/', (req, res) => {
         }
 
         .canvas-video-wrapper video {
-          width: 100%;
-          height: 100%;
-          border: none;
-          display: block;
-          object-fit: cover;
-          background: #000;
-          pointer-events: none;
-        }
-
-        /* Voice Note Tiles with Waveform Canvas */
-        .voice-note-tile {
-          position: absolute;
-          width: 260px;
-          height: 64px;
-          background: rgba(20, 20, 25, 0.92);
-          border: 1px solid #00ffcc;
-          border-radius: 32px;
-          display: flex;
-          align-items: center;
-          padding: 0 12px;
-          gap: 8px;
-          box-shadow: 0 6px 16px rgba(0,0,0,0.6);
-          pointer-events: auto;
-          user-select: none;
-          z-index: 5;
-          box-sizing: border-box;
-          backdrop-filter: blur(8px);
-        }
-
-        .voice-play-btn {
-          width: 38px;
-          height: 38px;
-          border-radius: 50%;
-          background: #00ffcc;
-          border: none;
-          color: #111;
-          font-weight: bold;
-          font-size: 16px;
-          cursor: pointer;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          flex-shrink: 0;
-          transition: transform 0.1s, background 0.2s;
-        }
-
-        .voice-play-btn:hover {
-          transform: scale(1.08);
-          background: #33ffe0;
-        }
-
-        .voice-info {
-          flex-grow: 1;
-          display: flex;
-          flex-direction: column;
-          gap: 2px;
-          overflow: hidden;
-        }
-
-        .voice-user {
-          font-size: 11px;
-          font-weight: bold;
-          color: #00ffcc;
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-        }
-
-        .waveform-canvas {
-          width: 120px;
-          height: 24px;
-          background: transparent;
-        }
-
-        .voice-delete-btn {
-          background: transparent;
-          border: none;
-          color: #ff5555;
-          font-weight: bold;
-          cursor: pointer;
-          font-size: 14px;
-          padding: 4px;
+          width: 100%; height: 100%; border: none; display: block; object-fit: cover; background: #000; pointer-events: none;
         }
 
         #toolbar {
@@ -157,27 +122,42 @@ app.get('/', (req, res) => {
         }
         button:hover, label.btn:hover, select:hover { background: #444; }
         button.active { background: #e74c3c; border-color: #ff6b6b; }
-        
-        #recordVoiceBtn.recording {
-          background: #e74c3c;
-          animation: pulse 1.2s infinite;
-        }
 
-        @keyframes pulse {
-          0% { box-shadow: 0 0 0 0 rgba(231, 76, 60, 0.7); }
-          70% { box-shadow: 0 0 0 10px rgba(231, 76, 60, 0); }
-          100% { box-shadow: 0 0 0 0 rgba(231, 76, 60, 0); }
+        /* Timer Widget Style */
+        #timerWidget {
+          position: fixed; top: 15px; right: 15px; z-index: 10;
+          background: rgba(20, 20, 25, 0.9); border: 1px solid #00ffcc;
+          padding: 8px 16px; border-radius: 20px; color: #00ffcc;
+          display: flex; align-items: center; gap: 10px; font-family: monospace;
+          box-shadow: 0 4px 12px rgba(0,0,0,0.5); backdrop-filter: blur(8px);
         }
+        #timerDisplay { font-size: 18px; font-weight: bold; min-width: 60px; text-align: center; }
+        .timer-btn { background: #00ffcc; color: #111; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-weight: bold; }
+        .timer-btn:hover { background: #33ffe0; }
 
-        #deleteMediaBtn {
-          background: #c0392b;
-          border-color: #e74c3c;
-          display: none;
+        /* Version History Modal */
+        #historyModal {
+          display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+          background: rgba(0, 0, 0, 0.8); z-index: 100;
+          justify-content: center; align-items: center;
         }
+        .modal-content {
+          background: #1e1e24; border: 1px solid #444; width: 500px; max-height: 80vh;
+          border-radius: 12px; padding: 20px; color: #fff; display: flex; flex-direction: column; gap: 15px;
+        }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #333; padding-bottom: 10px; }
+        .modal-title { font-size: 16px; font-weight: bold; color: #00ffcc; }
+        .close-btn { background: none; border: none; color: #888; font-size: 18px; cursor: pointer; }
+        .history-list { overflow-y: auto; display: flex; flex-direction: column; gap: 8px; max-height: 400px; }
+        .history-item {
+          background: #2a2a32; padding: 10px; border-radius: 6px; display: flex;
+          justify-content: space-between; align-items: center; border: 1px solid #3d3d4a;
+        }
+        .history-item:hover { border-color: #00ffcc; }
+
+        #deleteMediaBtn { background: #c0392b; border-color: #e74c3c; display: none; }
         #deleteMediaBtn:hover { background: #e74c3c; }
-
         input[type="file"] { display: none; }
-
         .control-group { display: flex; align-items: center; gap: 4px; }
       </style>
     </head>
@@ -199,8 +179,6 @@ app.get('/', (req, res) => {
         <button id="undoBtn">Undo</button>
         <button id="redoBtn">Redo</button>
 
-        <button id="recordVoiceBtn">🎙️ Record Voice Note</button>
-
         <div class="control-group">
           <select id="bgSelect">
             <option value="dark">Theme: Dark</option>
@@ -215,7 +193,32 @@ app.get('/', (req, res) => {
         <label for="videoUpload" class="btn">Add Video File</label>
         <input type="file" id="videoUpload" accept="video/*">
 
+        <button id="snapshotBtn">📸 Save Version Snapshot</button>
+        <button id="historyBtn">📜 Version History</button>
         <button id="deleteMediaBtn">Delete Selected</button>
+      </div>
+
+      <!-- Synchronized Timer Widget -->
+      <div id="timerWidget">
+        <span>⏱️</span>
+        <div id="timerDisplay">00:00</div>
+        <button class="timer-btn" id="timerSet5">5m</button>
+        <button class="timer-btn" id="timerSet10">10m</button>
+        <button class="timer-btn" id="timerToggle">Start</button>
+        <button class="timer-btn" id="timerReset">Reset</button>
+      </div>
+
+      <!-- Version History Modal -->
+      <div id="historyModal">
+        <div class="modal-content">
+          <div class="modal-header">
+            <div class="modal-title">Canvas Version History</div>
+            <button class="close-btn" id="closeHistoryModal">✖</button>
+          </div>
+          <div class="history-list" id="historyList">
+            <div style="color: #888; text-align: center;">No snapshots saved yet.</div>
+          </div>
+        </div>
       </div>
 
       <div id="overlayContainer"></div>
@@ -236,11 +239,27 @@ app.get('/', (req, res) => {
         const eraseBtn = document.getElementById('eraseBtn');
         const undoBtn = document.getElementById('undoBtn');
         const redoBtn = document.getElementById('redoBtn');
-        const recordVoiceBtn = document.getElementById('recordVoiceBtn');
         const bgSelect = document.getElementById('bgSelect');
         const imgUpload = document.getElementById('imgUpload');
         const videoUpload = document.getElementById('videoUpload');
         const deleteMediaBtn = document.getElementById('deleteMediaBtn');
+
+        // Timer DOM Elements
+        const timerDisplay = document.getElementById('timerDisplay');
+        const timerToggle = document.getElementById('timerToggle');
+        const timerReset = document.getElementById('timerReset');
+        const timerSet5 = document.getElementById('timerSet5');
+        const timerSet10 = document.getElementById('timerSet10');
+
+        // Version History DOM Elements
+        const snapshotBtn = document.getElementById('snapshotBtn');
+        const historyBtn = document.getElementById('historyBtn');
+        const historyModal = document.getElementById('historyModal');
+        const closeHistoryModal = document.getElementById('closeHistoryModal');
+        const historyList = document.getElementById('historyList');
+
+        let isTimerRunning = false;
+        let localRemainingSeconds = 0;
 
         function resizeCanvases() {
           mainCanvas.width = window.innerWidth;
@@ -266,7 +285,6 @@ app.get('/', (req, res) => {
         let remoteCursors = {};
         
         let mediaObjects = [];
-        let voiceNoteObjects = [];
         let selectedMedia = null;
         let dragMode = null;
         let isDragging = false;
@@ -277,14 +295,6 @@ app.get('/', (req, res) => {
         let renderScheduled = false;
         let lastNetworkSend = 0;
         let lastCursorSend = 0;
-
-        // Voice Recorder State
-        let mediaRecorder = null;
-        let audioChunks = [];
-        let isRecording = false;
-
-        // Shared Web Audio Context
-        let audioCtx = null;
 
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
         const socket = new WebSocket(\`\${protocol}//\${location.host}\`);
@@ -355,8 +365,6 @@ app.get('/', (req, res) => {
             }
           });
 
-          voiceNoteObjects.forEach(v => updateVoiceNoteDOMElement(v));
-
           for (const uid in userLayers) {
             mainCtx.drawImage(userLayers[uid].canvas, 0, 0);
           }
@@ -407,199 +415,91 @@ app.get('/', (req, res) => {
           wrapper.style.transform = \`rotate(\${obj.angle || 0}rad)\`;
         }
 
-        function createVoiceNoteTile(vData) {
-          const tile = document.createElement('div');
-          tile.id = 'voice_tile_' + vData.id;
-          tile.className = 'voice-note-tile';
+        // Timer Formatting & Controls
+        function formatTime(seconds) {
+          const m = Math.floor(seconds / 60).toString().padStart(2, '0');
+          const s = (seconds % 60).toString().padStart(2, '0');
+          return \`\${m}:\${s}\`;
+        }
 
-          const playBtn = document.createElement('button');
-          playBtn.className = 'voice-play-btn';
-          playBtn.innerText = '▶';
-
-          const waveCanvas = document.createElement('canvas');
-          waveCanvas.className = 'waveform-canvas';
-          waveCanvas.width = 120;
-          waveCanvas.height = 24;
-          const waveCtx = waveCanvas.getContext('2d');
-
-          // Pre-render static equalizer bars
-          drawStaticWaveform(waveCtx, 120, 24);
-
-          const audio = new Audio(vData.audioSrc);
-          audio.crossOrigin = "anonymous";
-
-          let analyser = null;
-          let source = null;
-          let animFrame = null;
-
-          function drawStaticWaveform(ctx, w, h) {
-            ctx.clearRect(0, 0, w, h);
-            ctx.fillStyle = 'rgba(0, 255, 204, 0.3)';
-            const barWidth = 3;
-            const gap = 2;
-            const numBars = Math.floor(w / (barWidth + gap));
-
-            for (let i = 0; i < numBars; i++) {
-              const barHeight = Math.sin(i * 0.4) * (h / 3) + (h / 2.5);
-              ctx.fillRect(i * (barWidth + gap), (h - barHeight) / 2, barWidth, barHeight);
-            }
+        timerSet5.onclick = () => {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'timer_control', action: 'start', duration: 300 }));
           }
+        };
 
-          function renderLiveWaveform() {
-            if (!analyser) return;
-
-            const bufferLength = analyser.frequencyBinCount;
-            const dataArray = new Uint8Array(bufferLength);
-            analyser.getByteFrequencyData(dataArray);
-
-            waveCtx.clearRect(0, 0, waveCanvas.width, waveCanvas.height);
-
-            const barWidth = 3;
-            const gap = 2;
-            const numBars = Math.floor(waveCanvas.width / (barWidth + gap));
-            const step = Math.floor(bufferLength / numBars);
-
-            for (let i = 0; i < numBars; i++) {
-              const value = dataArray[i * step] || 0;
-              const barHeight = Math.max(3, (value / 255) * waveCanvas.height);
-
-              waveCtx.fillStyle = '#00ffcc';
-              waveCtx.fillRect(i * (barWidth + gap), (waveCanvas.height - barHeight) / 2, barWidth, barHeight);
-            }
-
-            animFrame = requestAnimationFrame(renderLiveWaveform);
+        timerSet10.onclick = () => {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'timer_control', action: 'start', duration: 600 }));
           }
+        };
 
-          playBtn.onclick = () => {
-            if (!audioCtx) {
-              audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            }
-
-            if (audioCtx.state === 'suspended') {
-              audioCtx.resume();
-            }
-
-            if (audio.paused) {
-              if (!source) {
-                source = audioCtx.createMediaElementSource(audio);
-                analyser = audioCtx.createAnalyser();
-                analyser.fftSize = 64;
-                source.connect(analyser);
-                analyser.connect(audioCtx.destination);
-              }
-
-              audio.play();
-              playBtn.innerText = '⏸';
-              renderLiveWaveform();
+        timerToggle.onclick = () => {
+          if (socket.readyState === WebSocket.OPEN) {
+            if (isTimerRunning) {
+              socket.send(JSON.stringify({ type: 'timer_control', action: 'pause' }));
             } else {
-              audio.pause();
-              playBtn.innerText = '▶';
-              cancelAnimationFrame(animFrame);
-              drawStaticWaveform(waveCtx, waveCanvas.width, waveCanvas.height);
+              if (localRemainingSeconds > 0) {
+                socket.send(JSON.stringify({ type: 'timer_control', action: 'start', duration: localRemainingSeconds }));
+              } else {
+                socket.send(JSON.stringify({ type: 'timer_control', action: 'start', duration: 300 }));
+              }
             }
-          };
+          }
+        };
 
-          audio.onended = () => {
-            playBtn.innerText = '▶';
-            cancelAnimationFrame(animFrame);
-            drawStaticWaveform(waveCtx, waveCanvas.width, waveCanvas.height);
-          };
+        timerReset.onclick = () => {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'timer_control', action: 'reset' }));
+          }
+        };
 
-          const info = document.createElement('div');
-          info.className = 'voice-info';
+        // Version History Functions
+        snapshotBtn.onclick = () => {
+          const label = prompt("Enter a label for this version snapshot:", "Snapshot " + new Date().toLocaleTimeString());
+          if (label && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'save_snapshot', label }));
+          }
+        };
 
-          const userTag = document.createElement('div');
-          userTag.className = 'voice-user';
-          userTag.innerText = vData.userName || 'User Note';
+        historyBtn.onclick = () => {
+          historyModal.style.display = 'flex';
+        };
 
-          info.appendChild(userTag);
-          info.appendChild(waveCanvas);
+        closeHistoryModal.onclick = () => {
+          historyModal.style.display = 'none';
+        };
 
-          tile.appendChild(playBtn);
-          tile.appendChild(info);
-
-          if (vData.ownerId === myUserId) {
-            const deleteBtn = document.createElement('button');
-            deleteBtn.className = 'voice-delete-btn';
-            deleteBtn.innerText = '✖';
-            deleteBtn.onclick = () => removeVoiceNoteById(vData.id, true);
-            tile.appendChild(deleteBtn);
+        function renderHistoryList(snapshots) {
+          historyList.innerHTML = '';
+          if (!snapshots || snapshots.length === 0) {
+            historyList.innerHTML = '<div style="color: #888; text-align: center;">No snapshots saved yet.</div>';
+            return;
           }
 
-          overlayContainer.appendChild(tile);
-          updateVoiceNoteDOMElement(vData);
+          snapshots.forEach((snap) => {
+            const item = document.createElement('div');
+            item.className = 'history-item';
+
+            const details = document.createElement('div');
+            details.innerHTML = \`<strong style="color:#00ffcc;">\${snap.label}</strong><br><small style="color:#888;">\${snap.timestamp}</small>\`;
+
+            const restoreBtn = document.createElement('button');
+            restoreBtn.innerText = 'Restore';
+            restoreBtn.onclick = () => {
+              if (confirm(\`Restore version "\${snap.label}"?\`)) {
+                if (socket.readyState === WebSocket.OPEN) {
+                  socket.send(JSON.stringify({ type: 'restore_snapshot', id: snap.id }));
+                  historyModal.style.display = 'none';
+                }
+              }
+            };
+
+            item.appendChild(details);
+            item.appendChild(restoreBtn);
+            historyList.appendChild(item);
+          });
         }
-
-        function updateVoiceNoteDOMElement(vData) {
-          const tile = document.getElementById('voice_tile_' + vData.id);
-          if (tile) {
-            tile.style.left = vData.x + 'px';
-            tile.style.top = vData.y + 'px';
-          }
-        }
-
-        function removeVoiceNoteById(id, broadcast = false) {
-          const tile = document.getElementById('voice_tile_' + id);
-          if (tile) tile.remove();
-          voiceNoteObjects = voiceNoteObjects.filter(v => v.id !== id);
-
-          if (broadcast && socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ type: 'delete_voice_note', id }));
-          }
-        }
-
-        // Voice Recorder Logic
-        recordVoiceBtn.addEventListener('click', async () => {
-          if (!isRecording) {
-            try {
-              const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-              mediaRecorder = new MediaRecorder(stream);
-              audioChunks = [];
-
-              mediaRecorder.ondataavailable = (e) => {
-                if (e.data.size > 0) audioChunks.push(e.data);
-              };
-
-              mediaRecorder.onstop = () => {
-                const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
-                const reader = new FileReader();
-                reader.onloadend = () => {
-                  const base64Audio = reader.result;
-                  const newVoiceNote = {
-                    id: Math.random().toString(36).substring(2, 10),
-                    ownerId: myUserId,
-                    userName: 'User ' + myUserId.substring(0, 4),
-                    audioSrc: base64Audio,
-                    x: Math.max(50, Math.min(window.innerWidth - 280, (remoteCursors[myUserId]?.x || 100))),
-                    y: Math.max(50, Math.min(window.innerHeight - 100, (remoteCursors[myUserId]?.y || 100)))
-                  };
-
-                  voiceNoteObjects.push(newVoiceNote);
-                  createVoiceNoteTile(newVoiceNote);
-
-                  if (socket.readyState === WebSocket.OPEN) {
-                    socket.send(JSON.stringify({ type: 'add_voice_note', note: newVoiceNote }));
-                  }
-                };
-                reader.readAsDataURL(audioBlob);
-
-                stream.getTracks().forEach(track => track.stop());
-              };
-
-              mediaRecorder.start(500);
-              isRecording = true;
-              recordVoiceBtn.innerText = "🔴 Recording... Click to Stop";
-              recordVoiceBtn.classList.add('recording');
-            } catch (err) {
-              alert("Microphone access denied or not supported.");
-            }
-          } else {
-            mediaRecorder.stop();
-            isRecording = false;
-            recordVoiceBtn.innerText = "🎙️ Record Voice Note";
-            recordVoiceBtn.classList.remove('recording');
-          }
-        });
 
         function renderCursors() {
           cursorCtx.clearRect(0, 0, cursorCanvas.width, cursorCanvas.height);
@@ -1016,13 +916,17 @@ app.get('/', (req, res) => {
             if (message.media) {
               message.media.forEach(m => addMediaToCanvas(m));
             }
-
-            if (message.voiceNotes) {
-              voiceNoteObjects = message.voiceNotes;
-              voiceNoteObjects.forEach(v => createVoiceNoteTile(v));
-            }
             
             rebuildFromHistory(message.history);
+            renderHistoryList(message.versionHistory);
+
+            if (message.timer) {
+              localRemainingSeconds = message.timer.remainingSeconds;
+              isTimerRunning = message.timer.isRunning;
+              timerDisplay.innerText = formatTime(localRemainingSeconds);
+              timerToggle.innerText = isTimerRunning ? 'Pause' : 'Start';
+            }
+
             resizeCanvases();
           } 
           else if (message.type === 'user_joined') {
@@ -1066,14 +970,28 @@ app.get('/', (req, res) => {
           else if (message.type === 'delete_media') {
             removeMediaById(message.id);
           }
-          else if (message.type === 'add_voice_note') {
-            voiceNoteObjects.push(message.note);
-            createVoiceNoteTile(message.note);
-          }
-          else if (message.type === 'delete_voice_note') {
-            removeVoiceNoteById(message.id, false);
-          }
           else if (message.type === 'update_history') {
+            rebuildFromHistory(message.history);
+          }
+          else if (message.type === 'timer_update') {
+            localRemainingSeconds = message.remaining;
+            isTimerRunning = message.isRunning;
+            timerDisplay.innerText = formatTime(localRemainingSeconds);
+            timerToggle.innerText = isTimerRunning ? 'Pause' : 'Start';
+          }
+          else if (message.type === 'timer_finished') {
+            alert('⏰ Countdown Timer Finished!');
+          }
+          else if (message.type === 'update_snapshots') {
+            renderHistoryList(message.snapshots);
+          }
+          else if (message.type === 'board_restored') {
+            mediaObjects.forEach(m => {
+              const wrapper = document.getElementById('video_wrapper_' + m.id);
+              if (wrapper) wrapper.remove();
+            });
+            mediaObjects = [];
+            if (message.media) message.media.forEach(m => addMediaToCanvas(m));
             rebuildFromHistory(message.history);
           }
         };
@@ -1103,7 +1021,8 @@ wss.on('connection', (ws) => {
     userId, 
     history: drawHistory, 
     media: mediaStore,
-    voiceNotes,
+    versionHistory,
+    timer: timerState,
     users: connectedUsers 
   }));
 
@@ -1192,22 +1111,33 @@ wss.on('connection', (ws) => {
         });
       }
     }
-    else if (data.type === 'add_voice_note') {
-      data.note.ownerId = userId;
-      voiceNotes.push(data.note);
-      wss.clients.forEach((client) => {
-        if (client !== ws && client.readyState === 1) {
-          client.send(JSON.stringify(data));
-        }
-      });
+    else if (data.type === 'timer_control') {
+      if (data.action === 'start') {
+        startTimer(data.duration);
+      } else if (data.action === 'pause') {
+        pauseTimer();
+      } else if (data.action === 'reset') {
+        resetTimer();
+      }
     }
-    else if (data.type === 'delete_voice_note') {
-      voiceNotes = voiceNotes.filter(v => v.id !== data.id);
-      wss.clients.forEach((client) => {
-        if (client !== ws && client.readyState === 1) {
-          client.send(JSON.stringify(data));
-        }
-      });
+    else if (data.type === 'save_snapshot') {
+      const snapshot = {
+        id: Math.random().toString(36).substring(2, 10),
+        label: data.label || 'Snapshot',
+        timestamp: new Date().toLocaleTimeString(),
+        drawHistory: JSON.parse(JSON.stringify(drawHistory)),
+        mediaStore: JSON.parse(JSON.stringify(mediaStore))
+      };
+      versionHistory.unshift(snapshot);
+      broadcast({ type: 'update_snapshots', snapshots: versionHistory });
+    }
+    else if (data.type === 'restore_snapshot') {
+      const snap = versionHistory.find(s => s.id === data.id);
+      if (snap) {
+        drawHistory = JSON.parse(JSON.stringify(snap.drawHistory));
+        mediaStore = JSON.parse(JSON.stringify(snap.mediaStore));
+        broadcast({ type: 'board_restored', history: drawHistory, media: mediaStore });
+      }
     }
     else if (data.type === 'undo') {
       const removed = drawHistory.filter(item => item.strokeId === data.strokeId);
