@@ -5,12 +5,12 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
+// Per-room state storage
 const rooms = {};
 
-function getOrCreateRoom(roomId, password = null) {
+function getOrCreateRoom(roomId) {
   if (!rooms[roomId]) {
     rooms[roomId] = {
-      password: password,
       drawHistory: [],
       mediaStore: [],
       chatHistory: [],
@@ -44,9 +44,14 @@ app.get('/', (req, res) => {
     <head>
       <title>Collaborative Canvas</title>
       <style>
-        body { margin: 0; background: #111; overflow: hidden; font-family: sans-serif; }
+        body { margin: 0; background: #111; overflow: hidden; font-family: sans-serif; transition: background 0.3s; }
         body.theme-light { background: #f4f4f9; }
-        body.theme-grid { background-color: #111; }
+        body.theme-grid { 
+          background-color: #111;
+          background-image: linear-gradient(rgba(255,255,255,0.05) 1px, transparent 1px),
+                            linear-gradient(90deg, rgba(255,255,255,0.05) 1px, transparent 1px);
+          background-size: 20px 20px;
+        }
 
         canvas { display: block; position: absolute; top: 0; left: 0; }
         #mainCanvas { z-index: 2; }
@@ -74,7 +79,7 @@ app.get('/', (req, res) => {
         #status { font-weight: bold; font-size: 11px; color: #00ff00; margin-right: 5px; }
         #userBadge { 
           background: #222; border: 1px solid #444; padding: 3px 8px; 
-          border-radius: 12px; font-weight: bold; font-size: 11px; color: #00ffcc; cursor: pointer;
+          border-radius: 12px; font-weight: bold; font-size: 11px; color: #00ffcc; 
         }
         
         input[type="color"] {
@@ -82,12 +87,12 @@ app.get('/', (req, res) => {
           cursor: pointer; background: transparent;
         }
         
-        select, button, label.btn, input[type="text"].room-input, input[type="password"].room-input {
+        select, button, label.btn, input[type="text"].room-input {
           background: #333; color: white; border: 1px solid #555; padding: 5px 10px;
           border-radius: 4px; font-weight: bold; cursor: pointer; transition: all 0.2s;
           font-size: 12px;
         }
-        input[type="text"].room-input, input[type="password"].room-input { cursor: text; width: 80px; }
+        input[type="text"].room-input { cursor: text; width: 90px; }
         button:hover, label.btn:hover, select:hover { background: #444; }
         button.active { background: #e74c3c; border-color: #ff6b6b; }
 
@@ -95,27 +100,6 @@ app.get('/', (req, res) => {
         #deleteMediaBtn:hover { background: #e74c3c; }
         input[type="file"] { display: none; }
         .control-group { display: flex; align-items: center; gap: 4px; }
-
-        #followingBanner {
-          position: fixed; top: 70px; left: 50%; transform: translateX(-50%); z-index: 10;
-          background: #e74c3c; color: white; padding: 6px 14px; border-radius: 20px;
-          font-size: 12px; font-weight: bold; display: none; align-items: center; gap: 8px;
-          box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-        }
-        #followingBanner button { background: #fff; color: #111; border: none; border-radius: 10px; padding: 2px 8px; }
-
-        /* User List Popover */
-        #userListMenu {
-          position: fixed; top: 60px; left: 150px; z-index: 12;
-          background: #222; border: 1px solid #444; border-radius: 6px;
-          padding: 8px; width: 160px; display: none; flex-direction: column; gap: 6px;
-          box-shadow: 0 4px 15px rgba(0,0,0,0.5);
-        }
-        .user-item {
-          display: flex; align-items: center; justify-content: space-between;
-          padding: 4px 6px; border-radius: 4px; font-size: 12px; color: #fff; cursor: pointer;
-        }
-        .user-item:hover { background: #333; }
 
         /* Profile Modal */
         #profileModal {
@@ -212,13 +196,6 @@ app.get('/', (req, res) => {
         </div>
       </div>
 
-      <div id="followingBanner">
-        <span id="followingText">Following User</span>
-        <button id="stopFollowingBtn">Stop</button>
-      </div>
-
-      <div id="userListMenu"></div>
-
       <div id="toolbar">
         <span id="status">Connecting...</span>
         <span id="userBadge">👥 1 Online</span>
@@ -226,7 +203,6 @@ app.get('/', (req, res) => {
         <div class="control-group">
           <label>Room:</label>
           <input type="text" id="roomInput" class="room-input" placeholder="Room ID">
-          <input type="password" id="roomPassInput" class="room-input" placeholder="Pass (opt)">
           <button id="joinRoomBtn">Go</button>
         </div>
 
@@ -259,7 +235,6 @@ app.get('/', (req, res) => {
         <input type="file" id="videoUpload" accept="video/*">
 
         <button id="toggleGameBtn">🎮 Tic-Tac-Toe</button>
-        <button id="resetViewBtn">Reset View</button>
         <button id="deleteMediaBtn">Delete Selected</button>
         <button id="editProfileBtn">Profile</button>
       </div>
@@ -302,13 +277,13 @@ app.get('/', (req, res) => {
       <canvas id="cursorCanvas"></canvas>
 
       <script>
+        // Get Room ID from URL
         const urlParams = new URLSearchParams(window.location.search);
         let currentRoom = urlParams.get('room') || 'main';
         document.getElementById('roomInput').value = currentRoom;
 
         const status = document.getElementById('status');
         const userBadge = document.getElementById('userBadge');
-        const userListMenu = document.getElementById('userListMenu');
         const mainCanvas = document.getElementById('mainCanvas');
         const mainCtx = mainCanvas.getContext('2d');
         const cursorCanvas = document.getElementById('cursorCanvas');
@@ -325,13 +300,7 @@ app.get('/', (req, res) => {
         const videoUpload = document.getElementById('videoUpload');
         const deleteMediaBtn = document.getElementById('deleteMediaBtn');
         const roomInput = document.getElementById('roomInput');
-        const roomPassInput = document.getElementById('roomPassInput');
         const joinRoomBtn = document.getElementById('joinRoomBtn');
-        const resetViewBtn = document.getElementById('resetViewBtn');
-
-        const followingBanner = document.getElementById('followingBanner');
-        const followingText = document.getElementById('followingText');
-        const stopFollowingBtn = document.getElementById('stopFollowingBtn');
 
         const profileModal = document.getElementById('profileModal');
         const modalNameInput = document.getElementById('modalNameInput');
@@ -346,46 +315,25 @@ app.get('/', (req, res) => {
         const chatInput = document.getElementById('chatInput');
         const chatSendBtn = document.getElementById('chatSendBtn');
 
-        // Infinite Canvas Viewport State
-        let camera = { x: 0, y: 0, zoom: 1 };
-        let isPanning = false;
-        let panStart = { x: 0, y: 0 };
-        let followingUserId = null;
+        // Game Elements
+        const toggleGameBtn = document.getElementById('toggleGameBtn');
+        const gameWidget = document.getElementById('gameWidget');
+        const gameHeader = document.getElementById('gameHeader');
+        const closeGameBtn = document.getElementById('closeGameBtn');
+        const gameStatus = document.getElementById('gameStatus');
+        const tttCells = document.querySelectorAll('.ttt-cell');
+        const resetGameBtn = document.getElementById('resetGameBtn');
 
         let myUserId = null;
         let myName = 'User';
         let myCursorColor = '#00ffcc';
         let unreadCount = 0;
 
-        // Room Switcher
+        // Handle Room Switch
         joinRoomBtn.addEventListener('click', () => {
           const targetRoom = roomInput.value.trim() || 'main';
-          const pass = roomPassInput.value.trim();
-          let url = '?room=' + encodeURIComponent(targetRoom);
-          if (pass) url += '&pass=' + encodeURIComponent(pass);
-          window.location.href = url;
+          window.location.search = '?room=' + encodeURIComponent(targetRoom);
         });
-
-        resetViewBtn.addEventListener('click', () => {
-          camera = { x: 0, y: 0, zoom: 1 };
-          stopFollowing();
-          requestRender();
-          renderCursors();
-        });
-
-        function screenToWorld(sx, sy) {
-          return {
-            x: (sx - camera.x) / camera.zoom,
-            y: (sy - camera.y) / camera.zoom
-          };
-        }
-
-        function worldToScreen(wx, wy) {
-          return {
-            x: wx * camera.zoom + camera.x,
-            y: wy * camera.zoom + camera.y
-          };
-        }
 
         function resizeCanvases() {
           mainCanvas.width = window.innerWidth;
@@ -422,8 +370,7 @@ app.get('/', (req, res) => {
         let lastCursorSend = 0;
 
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const roomPass = urlParams.get('pass') || '';
-        const socket = new WebSocket(\`\${protocol}//\${location.host}?room=\${encodeURIComponent(currentRoom)}&pass=\${encodeURIComponent(roomPass)}\`);
+        const socket = new WebSocket(\`\${protocol}//\${location.host}?room=\${encodeURIComponent(currentRoom)}\`);
 
         socket.onopen = () => {
           status.innerText = "CONNECTED (" + currentRoom + ")";
@@ -435,6 +382,7 @@ app.get('/', (req, res) => {
           status.style.color = "#ff0000";
         };
 
+        // Profile Setup
         saveProfileBtn.addEventListener('click', () => {
           if (modalNameInput.value.trim()) {
             myName = modalNameInput.value.trim();
@@ -457,73 +405,7 @@ app.get('/', (req, res) => {
           profileModal.style.display = 'flex';
         });
 
-        userBadge.addEventListener('click', () => {
-          userListMenu.style.display = userListMenu.style.display === 'flex' ? 'none' : 'flex';
-          updateUserListMenu();
-        });
-
-        function updateUserListMenu() {
-          userListMenu.innerHTML = '';
-          for (const uid in remoteCursors) {
-            if (uid === myUserId) continue;
-            const u = remoteCursors[uid];
-            const div = document.createElement('div');
-            div.className = 'user-item';
-            div.innerHTML = \`<span style="color:\${u.color}">● \${u.name}</span> <small style="color:#aaa">Follow</small>\`;
-            div.onclick = () => followUser(uid);
-            userListMenu.appendChild(div);
-          }
-          if (userListMenu.children.length === 0) {
-            userListMenu.innerHTML = '<div style="font-size:11px; color:#888;">No other users</div>';
-          }
-        }
-
-        function followUser(uid) {
-          followingUserId = uid;
-          userListMenu.style.display = 'none';
-          const u = remoteCursors[uid];
-          followingText.innerText = 'Following ' + (u ? u.name : 'User');
-          followingBanner.style.display = 'flex';
-          updateFollowCamera();
-        }
-
-        function stopFollowing() {
-          followingUserId = null;
-          followingBanner.style.display = 'none';
-        }
-
-        stopFollowingBtn.addEventListener('click', stopFollowing);
-
-        function updateFollowCamera() {
-          if (!followingUserId || !remoteCursors[followingUserId]) return;
-          const u = remoteCursors[followingUserId];
-          if (u.x !== undefined && u.y !== undefined) {
-            camera.x = window.innerWidth / 2 - u.x * camera.zoom;
-            camera.y = window.innerHeight / 2 - u.y * camera.zoom;
-            requestRender();
-            renderCursors();
-          }
-        }
-
-        window.addEventListener('wheel', (e) => {
-          if (e.target.closest('#toolbar') || e.target.closest('#chatDrawer') || e.target.closest('#gameWidget')) return;
-          e.preventDefault();
-          stopFollowing();
-
-          const zoomFactor = e.deltaY < 0 ? 1.1 : 0.9;
-          const mouseX = e.clientX;
-          const mouseY = e.clientY;
-
-          const worldPos = screenToWorld(mouseX, mouseY);
-          camera.zoom = Math.max(0.1, Math.min(5, camera.zoom * zoomFactor));
-
-          camera.x = mouseX - worldPos.x * camera.zoom;
-          camera.y = mouseY - worldPos.y * camera.zoom;
-
-          requestRender();
-          renderCursors();
-        }, { passive: false });
-
+        // Chat Toggle & Messaging
         chatHeader.addEventListener('click', () => {
           chatDrawer.classList.toggle('collapsed');
           if (!chatDrawer.classList.contains('collapsed')) {
@@ -571,14 +453,7 @@ app.get('/', (req, res) => {
           }
         }
 
-        const toggleGameBtn = document.getElementById('toggleGameBtn');
-        const gameWidget = document.getElementById('gameWidget');
-        const gameHeader = document.getElementById('gameHeader');
-        const closeGameBtn = document.getElementById('closeGameBtn');
-        const gameStatus = document.getElementById('gameStatus');
-        const tttCells = document.querySelectorAll('.ttt-cell');
-        const resetGameBtn = document.getElementById('resetGameBtn');
-
+        // --- Tic-Tac-Toe Game Interactions ---
         let isDraggingGame = false;
         let gameDragOffset = { x: 0, y: 0 };
 
@@ -659,16 +534,13 @@ app.get('/', (req, res) => {
           }
         }
 
-        // Expanded infinite offscreen layer creation
         function getUserLayer(userId) {
           if (!userLayers[userId]) {
             const canvas = document.createElement('canvas');
-            canvas.width = 10000;
-            canvas.height = 10000;
+            canvas.width = mainCanvas.width;
+            canvas.height = mainCanvas.height;
             const ctx = canvas.getContext('2d');
-            // Offset drawing coordinates to center of canvas space so users can draw infinitely in all directions
-            ctx.translate(5000, 5000);
-            userLayers[userId] = { canvas, ctx, offsetX: 5000, offsetY: 5000 };
+            userLayers[userId] = { canvas, ctx };
           }
           return userLayers[userId];
         }
@@ -688,31 +560,6 @@ app.get('/', (req, res) => {
           renderScheduled = false;
           mainCtx.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
           
-          // Render Infinite Grid Background if grid theme is chosen
-          if (bgSelect.value === 'grid') {
-            mainCtx.save();
-            const gridSize = 20 * camera.zoom;
-            const offsetX = camera.x % gridSize;
-            const offsetY = camera.y % gridSize;
-            mainCtx.strokeStyle = 'rgba(255,255,255,0.05)';
-            mainCtx.lineWidth = 1;
-            mainCtx.beginPath();
-            for (let x = offsetX; x < mainCanvas.width; x += gridSize) {
-              mainCtx.moveTo(x, 0);
-              mainCtx.lineTo(x, mainCanvas.height);
-            }
-            for (let y = offsetY; y < mainCanvas.height; y += gridSize) {
-              mainCtx.moveTo(0, y);
-              mainCtx.lineTo(mainCanvas.width, y);
-            }
-            mainCtx.stroke();
-            mainCtx.restore();
-          }
-
-          mainCtx.save();
-          mainCtx.translate(camera.x, camera.y);
-          mainCtx.scale(camera.zoom, camera.zoom);
-
           mediaObjects.forEach(obj => {
             if (obj.mediaType === 'image' && obj.imgElement && obj.imgElement.complete) {
               mainCtx.save();
@@ -744,16 +591,13 @@ app.get('/', (req, res) => {
           });
 
           for (const uid in userLayers) {
-            const layer = userLayers[uid];
-            mainCtx.drawImage(layer.canvas, -layer.offsetX, -layer.offsetY);
+            mainCtx.drawImage(userLayers[uid].canvas, 0, 0);
           }
-
-          mainCtx.restore();
         }
 
         function drawSelectionControls(obj) {
           mainCtx.strokeStyle = '#00ffcc';
-          mainCtx.lineWidth = 2 / camera.zoom;
+          mainCtx.lineWidth = 2;
           mainCtx.strokeRect(-obj.w / 2, -obj.h / 2, obj.w, obj.h);
 
           mainCtx.fillStyle = '#00ffcc';
@@ -789,11 +633,10 @@ app.get('/', (req, res) => {
             video.play().catch(e => console.log('Autoplay blocked:', e));
           }
 
-          const screenPos = worldToScreen(obj.x, obj.y);
-          wrapper.style.left = screenPos.x + 'px';
-          wrapper.style.top = screenPos.y + 'px';
-          wrapper.style.width = (obj.w * camera.zoom) + 'px';
-          wrapper.style.height = (obj.h * camera.zoom) + 'px';
+          wrapper.style.left = obj.x + 'px';
+          wrapper.style.top = obj.y + 'px';
+          wrapper.style.width = obj.w + 'px';
+          wrapper.style.height = obj.h + 'px';
           wrapper.style.transform = \`rotate(\${obj.angle || 0}rad)\`;
         }
 
@@ -805,10 +648,8 @@ app.get('/', (req, res) => {
             const cursor = remoteCursors[uid];
             if (cursor.x === undefined || cursor.y === undefined) continue;
 
-            const screenPos = worldToScreen(cursor.x, cursor.y);
-
             cursorCtx.save();
-            cursorCtx.translate(screenPos.x, screenPos.y);
+            cursorCtx.translate(cursor.x, cursor.y);
 
             cursorCtx.beginPath();
             cursorCtx.moveTo(0, 0);
@@ -867,8 +708,7 @@ app.get('/', (req, res) => {
 
         function clearAllLayers() {
           for (const uid in userLayers) {
-            const layer = userLayers[uid];
-            layer.ctx.clearRect(-layer.offsetX, -layer.offsetY, layer.canvas.width, layer.canvas.height);
+            userLayers[uid].ctx.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
           }
         }
 
@@ -963,11 +803,11 @@ app.get('/', (req, res) => {
           return null;
         }
 
-        function sendCursorPosition(worldX, worldY) {
+        function sendCursorPosition(x, y) {
           const now = Date.now();
           if (now - lastCursorSend > 30) {
             if (socket.readyState === WebSocket.OPEN) {
-              socket.send(JSON.stringify({ type: 'cursor_move', x: worldX, y: worldY }));
+              socket.send(JSON.stringify({ type: 'cursor_move', x, y }));
             }
             lastCursorSend = now;
           }
@@ -977,19 +817,13 @@ app.get('/', (req, res) => {
         cursorCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
         mainCanvas.addEventListener('mousedown', (e) => {
-          if (e.button === 2) {
-            isPanning = true;
-            panStart = { x: e.clientX - camera.x, y: e.clientY - camera.y };
-            stopFollowing();
-            return;
-          }
-
           if (e.button !== 0) return;
 
-          const worldPos = screenToWorld(e.clientX, e.clientY);
+          const x = e.clientX;
+          const y = e.clientY;
 
           if (selectedMedia && selectedMedia.ownerId === myUserId) {
-            const handle = getHitHandle(selectedMedia, worldPos.x, worldPos.y);
+            const handle = getHitHandle(selectedMedia, x, y);
             if (handle) {
               dragMode = handle;
               isDragging = true;
@@ -997,12 +831,12 @@ app.get('/', (req, res) => {
             }
           }
 
-          const hitMedia = getHitMedia(worldPos.x, worldPos.y);
+          const hitMedia = getHitMedia(x, y);
           if (hitMedia) {
             selectedMedia = hitMedia;
             dragMode = 'move';
             isDragging = true;
-            dragOffset = { x: worldPos.x - selectedMedia.x, y: worldPos.y - selectedMedia.y };
+            dragOffset = { x: x - selectedMedia.x, y: y - selectedMedia.y };
             updateDeleteBtnVisibility();
             requestRender();
             return;
@@ -1018,32 +852,26 @@ app.get('/', (req, res) => {
           currentStrokeId = Math.random().toString(36).substring(2, 10);
           undoStack.push(currentStrokeId);
           redoStack.length = 0;
-          lastPos = worldPos;
+          lastPos = { x, y };
           handlePointerMove(e);
         });
 
         function handlePointerMove(e) {
-          if (isPanning) {
-            camera.x = e.clientX - panStart.x;
-            camera.y = e.clientY - panStart.y;
-            requestRender();
-            renderCursors();
-            return;
-          }
+          const x = e.clientX;
+          const y = e.clientY;
 
-          const worldPos = screenToWorld(e.clientX, e.clientY);
-          sendCursorPosition(worldPos.x, worldPos.y);
+          sendCursorPosition(x, y);
 
           if (dragMode === 'move' && selectedMedia && selectedMedia.ownerId === myUserId) {
-            selectedMedia.x = worldPos.x - dragOffset.x;
-            selectedMedia.y = worldPos.y - dragOffset.y;
+            selectedMedia.x = x - dragOffset.x;
+            selectedMedia.y = y - dragOffset.y;
             requestRender();
             syncMediaUpdateThrottled(selectedMedia);
             return;
           }
 
           if (dragMode === 'resize' && selectedMedia && selectedMedia.ownerId === myUserId) {
-            const local = toLocalCoords(selectedMedia, worldPos.x, worldPos.y);
+            const local = toLocalCoords(selectedMedia, x, y);
             selectedMedia.w = Math.max(50, local.x * 2);
             selectedMedia.h = Math.max(50, local.y * 2);
             requestRender();
@@ -1054,7 +882,7 @@ app.get('/', (req, res) => {
           if (dragMode === 'rotate' && selectedMedia && selectedMedia.ownerId === myUserId) {
             const cx = selectedMedia.x + selectedMedia.w / 2;
             const cy = selectedMedia.y + selectedMedia.h / 2;
-            selectedMedia.angle = Math.atan2(worldPos.y - cy, worldPos.x - cx) + Math.PI / 2;
+            selectedMedia.angle = Math.atan2(y - cy, x - cx) + Math.PI / 2;
             requestRender();
             syncMediaUpdateThrottled(selectedMedia);
             return;
@@ -1062,7 +890,7 @@ app.get('/', (req, res) => {
 
           if (!drawing) return;
 
-          const currentPos = worldPos;
+          const currentPos = { x, y };
           if (!lastPos) lastPos = currentPos;
 
           const size = parseInt(brushSize.value);
@@ -1087,7 +915,6 @@ app.get('/', (req, res) => {
         mainCanvas.addEventListener('mousemove', handlePointerMove);
 
         window.addEventListener('mouseup', () => {
-          isPanning = false;
           if (dragMode && selectedMedia && selectedMedia.ownerId === myUserId) {
             syncMediaUpdate(selectedMedia);
           }
@@ -1122,7 +949,6 @@ app.get('/', (req, res) => {
         imgUpload.addEventListener('change', (e) => {
           const file = e.target.files[0];
           if (file) {
-            const centerWorld = screenToWorld(window.innerWidth / 2, window.innerHeight / 2);
             const reader = new FileReader();
             reader.onload = (event) => {
               const newMediaData = {
@@ -1130,7 +956,7 @@ app.get('/', (req, res) => {
                 ownerId: myUserId,
                 mediaType: 'image',
                 src: event.target.result,
-                x: centerWorld.x - 100, y: centerWorld.y - 100,
+                x: 100, y: 100,
                 w: 200, h: 200,
                 angle: 0
               };
@@ -1151,7 +977,6 @@ app.get('/', (req, res) => {
         videoUpload.addEventListener('change', (e) => {
           const file = e.target.files[0];
           if (file) {
-            const centerWorld = screenToWorld(window.innerWidth / 2, window.innerHeight / 2);
             const reader = new FileReader();
             reader.onload = (event) => {
               const newMediaData = {
@@ -1159,7 +984,7 @@ app.get('/', (req, res) => {
                 ownerId: myUserId,
                 mediaType: 'video',
                 src: event.target.result,
-                x: centerWorld.x - 160, y: centerWorld.y - 120,
+                x: 150, y: 150,
                 w: 320, h: 240,
                 angle: 0
               };
@@ -1201,7 +1026,7 @@ app.get('/', (req, res) => {
         redoBtn.addEventListener('click', triggerRedo);
 
         window.addEventListener('keydown', (e) => {
-          if (document.activeElement === chatInput || document.activeElement === modalNameInput || document.activeElement === roomInput || document.activeElement === roomPassInput) return;
+          if (document.activeElement === chatInput || document.activeElement === modalNameInput || document.activeElement === roomInput) return;
 
           if (e.key === 'Delete' || e.key === 'Backspace') {
             if (selectedMedia && selectedMedia.ownerId === myUserId) {
@@ -1218,7 +1043,6 @@ app.get('/', (req, res) => {
           if (e.target.value !== 'dark') {
             document.body.classList.add('theme-' + e.target.value);
           }
-          requestRender();
         });
 
         eraseBtn.addEventListener('click', () => {
@@ -1229,12 +1053,6 @@ app.get('/', (req, res) => {
 
         socket.onmessage = (e) => {
           const message = JSON.parse(e.data);
-
-          if (message.type === 'error') {
-            alert(message.message);
-            window.location.href = '?room=main';
-            return;
-          }
 
           if (message.type === 'init') {
             myUserId = message.userId;
@@ -1263,7 +1081,6 @@ app.get('/', (req, res) => {
             remoteCursors[message.user.userId] = message.user;
             userBadge.innerText = \`👥 \${Object.keys(remoteCursors).length} Online\`;
             appendChatMessage(null, \`\${message.user.name} joined the room\`, null, true);
-            updateUserListMenu();
             renderCursors();
           }
           else if (message.type === 'user_left') {
@@ -1273,14 +1090,12 @@ app.get('/', (req, res) => {
             }
             delete remoteCursors[message.userId];
             userBadge.innerText = \`👥 \${Object.keys(remoteCursors).length} Online\`;
-            updateUserListMenu();
             renderCursors();
           }
           else if (message.type === 'update_profile') {
             if (remoteCursors[message.userId]) {
               remoteCursors[message.userId].name = message.name;
               remoteCursors[message.userId].color = message.color;
-              updateUserListMenu();
               renderCursors();
             }
           }
@@ -1294,9 +1109,6 @@ app.get('/', (req, res) => {
             if (remoteCursors[message.userId]) {
               remoteCursors[message.userId].x = message.x;
               remoteCursors[message.userId].y = message.y;
-              if (followingUserId === message.userId) {
-                updateFollowCamera();
-              }
               renderCursors();
             }
           }
@@ -1354,15 +1166,7 @@ function checkTTTWinner(board) {
 wss.on('connection', (ws, req) => {
   const url = new URL(req.url, 'http://localhost');
   const roomId = url.searchParams.get('room') || 'main';
-  const providedPass = url.searchParams.get('pass') || null;
-
-  if (rooms[roomId] && rooms[roomId].password && rooms[roomId].password !== providedPass) {
-    ws.send(JSON.stringify({ type: 'error', message: 'Incorrect room password.' }));
-    ws.close();
-    return;
-  }
-
-  const room = getOrCreateRoom(roomId, providedPass);
+  const room = getOrCreateRoom(roomId);
 
   if (!undoneHistory[roomId]) undoneHistory[roomId] = [];
 
@@ -1379,6 +1183,7 @@ wss.on('connection', (ws, req) => {
     y: 0
   };
 
+  // Broadcast function to room members
   function broadcastRoom(data, excludeWs = null) {
     for (let id in room.connectedUsers) {
       const clientWs = room.connectedUsers[id].ws;
@@ -1388,6 +1193,7 @@ wss.on('connection', (ws, req) => {
     }
   }
 
+  // Sanitize user list for network transmission (remove circular WS ref)
   function getSanitizedUsers() {
     const list = {};
     for (let id in room.connectedUsers) {
