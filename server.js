@@ -6,7 +6,6 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-// Store all drawn points: { id, userId, x, y, color, size }
 let drawHistory = [];
 
 app.get('/', (req, res) => {
@@ -52,7 +51,7 @@ app.get('/', (req, res) => {
         </div>
         <div class="control-group">
           <label for="brushSize">Size:</label>
-          <input type="range" id="brushSize" min="2" max="40" value="8">
+          <input type="range" id="brushSize" min="2" max="50" value="12">
         </div>
         <button id="eraseBtn">Eraser: OFF</button>
       </div>
@@ -74,6 +73,7 @@ app.get('/', (req, res) => {
         let localHistory = [];
         let isEraserMode = false;
         let drawing = false;
+        let eraseThrottleTimer = null;
 
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
         const socket = new WebSocket(\`\${protocol}//\${location.host}\`);
@@ -90,7 +90,13 @@ app.get('/', (req, res) => {
 
         function redrawAll() {
           ctx.clearRect(0, 0, canvas.width, canvas.height);
-          localHistory.forEach(pt => drawSinglePoint(pt));
+          for (let i = 0; i < localHistory.length; i++) {
+            const pt = localHistory[i];
+            ctx.fillStyle = pt.color;
+            ctx.beginPath();
+            ctx.arc(pt.x, pt.y, pt.size, 0, Math.PI * 2);
+            ctx.fill();
+          }
         }
 
         function drawSinglePoint(pt) {
@@ -104,18 +110,33 @@ app.get('/', (req, res) => {
           const size = parseInt(brushSize.value);
 
           if (isEraserMode) {
-            if (socket.readyState === WebSocket.OPEN) {
-              socket.send(JSON.stringify({ type: 'erase_mine', x, y, radius: size }));
+            // 1. INSTANT LOCAL ERASE: Remove only my points locally and redraw immediately
+            const initialLength = localHistory.length;
+            localHistory = localHistory.filter(pt => {
+              if (pt.userId !== myUserId) return true;
+              return Math.hypot(pt.x - x, pt.y - y) > size;
+            });
+
+            if (localHistory.length !== initialLength) {
+              redrawAll();
+
+              // 2. THROTTLED SERVER SYNC: Only talk to server every 50ms instead of every pixel
+              if (!eraseThrottleTimer) {
+                eraseThrottleTimer = setTimeout(() => {
+                  if (socket.readyState === WebSocket.OPEN) {
+                    socket.send(JSON.stringify({ type: 'erase_mine', x, y, radius: size }));
+                  }
+                  eraseThrottleTimer = null;
+                }, 50);
+              }
             }
           } else {
             const color = colorPicker.value;
             const tempPoint = { userId: myUserId, x, y, color, size };
 
-            // 1. Draw locally INSTANTLY so there is zero delay
             drawSinglePoint(tempPoint);
             localHistory.push(tempPoint);
 
-            // 2. Send to server in background
             if (socket.readyState === WebSocket.OPEN) {
               socket.send(JSON.stringify({ type: 'draw', x, y, color, size }));
             }
@@ -141,7 +162,6 @@ app.get('/', (req, res) => {
             redrawAll();
           } 
           else if (message.type === 'draw') {
-            // Only draw incoming points from OTHER users (since local points are already rendered)
             if (message.point.userId !== myUserId) {
               localHistory.push(message.point);
               drawSinglePoint(message.point);
@@ -187,8 +207,7 @@ wss.on('connection', (ws) => {
       const beforeCount = drawHistory.length;
       drawHistory = drawHistory.filter((pt) => {
         if (pt.userId !== userId) return true;
-        const distance = Math.hypot(pt.x - data.x, pt.y - data.y);
-        return distance > data.radius;
+        return Math.hypot(pt.x - data.x, pt.y - data.y) > data.radius;
       });
 
       if (drawHistory.length !== beforeCount) {
