@@ -7,7 +7,7 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
 let drawHistory = [];
-let mediaStore = []; // Stores both images and video elements
+let mediaStore = []; // Stores images and video elements
 const connectedUsers = {}; // Stores user details: { userId: { color, x, y, name } }
 
 function getRandomColor() {
@@ -24,7 +24,7 @@ app.get('/', (req, res) => {
     <!DOCTYPE html>
     <html>
     <head>
-      <title>Shared Canvas with Video</title>
+      <title>Shared Canvas with Video File Upload</title>
       <style>
         body { margin: 0; background: #111; overflow: hidden; font-family: sans-serif; transition: background 0.3s; }
         body.theme-light { background: #f4f4f9; }
@@ -47,12 +47,13 @@ app.get('/', (req, res) => {
           box-sizing: border-box;
         }
 
-        .canvas-video-wrapper video, .canvas-video-wrapper iframe {
+        .canvas-video-wrapper video {
           width: 100%;
           height: 100%;
           border: none;
           display: block;
           object-fit: cover;
+          background: #000;
         }
 
         .canvas-video-wrapper.selected {
@@ -126,7 +127,7 @@ app.get('/', (req, res) => {
         <label for="imgUpload" class="btn">Add Image</label>
         <input type="file" id="imgUpload" accept="image/*">
 
-        <button id="addVideoBtn">Add Video</button>
+        <label for="videoUpload" class="btn">Add Video File</label>
         <input type="file" id="videoUpload" accept="video/*">
 
         <button id="deleteMediaBtn">Delete Selected</button>
@@ -153,7 +154,6 @@ app.get('/', (req, res) => {
         const bgSelect = document.getElementById('bgSelect');
         const imgUpload = document.getElementById('imgUpload');
         const videoUpload = document.getElementById('videoUpload');
-        const addVideoBtn = document.getElementById('addVideoBtn');
         const deleteMediaBtn = document.getElementById('deleteMediaBtn');
 
         function resizeCanvases() {
@@ -179,7 +179,7 @@ app.get('/', (req, res) => {
         const userLayers = {};
         let remoteCursors = {};
         
-        let mediaObjects = []; // Both image and video data objects
+        let mediaObjects = [];
         let selectedMedia = null;
         let dragMode = null;
         let isDragging = false;
@@ -281,26 +281,17 @@ app.get('/', (req, res) => {
             wrapper.id = 'video_wrapper_' + obj.id;
             wrapper.className = 'canvas-video-wrapper';
 
-            if (obj.isEmbed) {
-              const iframe = document.createElement('iframe');
-              iframe.src = obj.src;
-              iframe.allow = "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture";
-              iframe.allowFullscreen = true;
-              wrapper.appendChild(iframe);
-            } else {
-              const video = document.createElement('video');
-              video.src = obj.src;
-              video.controls = true;
-              video.autoplay = false;
-              video.muted = false;
+            const video = document.createElement('video');
+            video.src = obj.src;
+            video.controls = true;
+            video.autoplay = false;
+            video.muted = false;
 
-              video.onplay = () => syncVideoState(obj.id, 'play', video.currentTime);
-              video.onpause = () => syncVideoState(obj.id, 'pause', video.currentTime);
-              video.onseeked = () => syncVideoState(obj.id, 'seek', video.currentTime);
+            video.onplay = () => syncVideoState(obj.id, 'play', video.currentTime);
+            video.onpause = () => syncVideoState(obj.id, 'pause', video.currentTime);
+            video.onseeked = () => syncVideoState(obj.id, 'seek', video.currentTime);
 
-              wrapper.appendChild(video);
-            }
-
+            wrapper.appendChild(video);
             videoContainer.appendChild(wrapper);
           }
 
@@ -660,50 +651,7 @@ app.get('/', (req, res) => {
           e.target.value = '';
         });
 
-        // Video upload and link dialog handler
-        addVideoBtn.addEventListener('click', () => {
-          const option = prompt("Enter '1' to paste a Video URL/YouTube link, or '2' to upload a file from your computer:");
-          if (option === '1') {
-            let url = prompt("Paste direct MP4/WebM URL or YouTube link:");
-            if (url) {
-              let isEmbed = false;
-              let embedUrl = url;
-
-              // Convert YouTube watch links to embed links
-              if (url.includes('youtube.com/watch?v=')) {
-                const videoId = url.split('v=')[1].split('&')[0];
-                embedUrl = \`https://www.youtube.com/embed/\${videoId}\`;
-                isEmbed = true;
-              } else if (url.includes('youtu.be/')) {
-                const videoId = url.split('youtu.be/')[1].split('?')[0];
-                embedUrl = \`https://www.youtube.com/embed/\${videoId}\`;
-                isEmbed = true;
-              }
-
-              const newMediaData = {
-                id: Math.random().toString(36).substring(2, 10),
-                ownerId: myUserId,
-                mediaType: 'video',
-                src: embedUrl,
-                isEmbed: isEmbed,
-                x: 150, y: 150,
-                w: 320, h: 240,
-                angle: 0
-              };
-
-              addMediaToCanvas(newMediaData);
-              selectedMedia = mediaObjects[mediaObjects.length - 1];
-              updateDeleteBtnVisibility();
-
-              if (socket.readyState === WebSocket.OPEN) {
-                socket.send(JSON.stringify({ type: 'add_media', media: newMediaData }));
-              }
-            }
-          } else if (option === '2') {
-            videoUpload.click();
-          }
-        });
-
+        // Direct Video File Upload Handler
         videoUpload.addEventListener('change', (e) => {
           const file = e.target.files[0];
           if (file) {
@@ -714,7 +662,6 @@ app.get('/', (req, res) => {
                 ownerId: myUserId,
                 mediaType: 'video',
                 src: event.target.result,
-                isEmbed: false,
                 x: 150, y: 150,
                 w: 320, h: 240,
                 angle: 0
