@@ -24,12 +24,7 @@ app.get('/', (req, res) => {
           background-size: 20px 20px;
         }
 
-        #bg-image-layer {
-          position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
-          object-fit: cover; z-index: 1; display: none;
-        }
-        
-        canvas { display: block; cursor: crosshair; position: relative; z-index: 2; }
+        canvas { display: block; position: absolute; top: 0; left: 0; z-index: 2; }
         
         #toolbar {
           position: fixed; top: 15px; left: 15px; z-index: 10;
@@ -58,8 +53,6 @@ app.get('/', (req, res) => {
       </style>
     </head>
     <body>
-      <img id="bg-image-layer" alt="Background">
-
       <div id="toolbar">
         <span id="status">Connecting...</span>
 
@@ -84,8 +77,8 @@ app.get('/', (req, res) => {
           </select>
         </div>
 
-        <label for="bgUpload" class="btn">Upload BG</label>
-        <input type="file" id="bgUpload" accept="image/*">
+        <label for="imgUpload" class="btn">Add Image</label>
+        <input type="file" id="imgUpload" accept="image/*">
       </div>
 
       <canvas id="mainCanvas"></canvas>
@@ -100,8 +93,7 @@ app.get('/', (req, res) => {
         const undoBtn = document.getElementById('undoBtn');
         const redoBtn = document.getElementById('redoBtn');
         const bgSelect = document.getElementById('bgSelect');
-        const bgUpload = document.getElementById('bgUpload');
-        const bgImageLayer = document.getElementById('bg-image-layer');
+        const imgUpload = document.getElementById('imgUpload');
 
         mainCanvas.width = window.innerWidth;
         mainCanvas.height = window.innerHeight;
@@ -111,12 +103,18 @@ app.get('/', (req, res) => {
         let drawing = false;
         let lastPos = null;
 
-        // Undo / Redo Stacks for local user actions
         const undoStack = [];
         const redoStack = [];
         let currentStrokeId = null;
 
         const userLayers = {};
+        
+        // Image object management
+        let imageObjects = []; // Array of { id, src, x, y, w, h, imgElement }
+        let selectedImg = null;
+        let dragMode = null; // 'move' or 'resize'
+        let dragOffset = { x: 0, y: 0 };
+        const HANDLE_SIZE = 10;
 
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
         const socket = new WebSocket(\`\${protocol}//\${location.host}\`);
@@ -144,6 +142,25 @@ app.get('/', (req, res) => {
 
         function flattenLayersToMain() {
           mainCtx.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
+          
+          // 1. Draw images on bottom layer
+          imageObjects.forEach(obj => {
+            if (obj.imgElement && obj.imgElement.complete) {
+              mainCtx.drawImage(obj.imgElement, obj.x, obj.y, obj.w, obj.h);
+              
+              // Draw selection boundary & resize handle for the active image
+              if (obj === selectedImg) {
+                mainCtx.strokeStyle = '#00ffcc';
+                mainCtx.lineWidth = 2;
+                mainCtx.strokeRect(obj.x, obj.y, obj.w, obj.h);
+
+                mainCtx.fillStyle = '#00ffcc';
+                mainCtx.fillRect(obj.x + obj.w - HANDLE_SIZE, obj.y + obj.h - HANDLE_SIZE, HANDLE_SIZE, HANDLE_SIZE);
+              }
+            }
+          });
+
+          // 2. Overlay user drawing layers on top
           for (const uid in userLayers) {
             mainCtx.drawImage(userLayers[uid].canvas, 0, 0);
           }
@@ -179,20 +196,104 @@ app.get('/', (req, res) => {
           for (const uid in userLayers) {
             userLayers[uid].ctx.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
           }
-          flattenLayersToMain();
         }
 
         function rebuildFromHistory(history) {
           clearAllLayers();
           history.forEach(item => {
-            strokeSegment(item.userId, item.x1, item.y1, item.x2, item.y2, item.color, item.size, item.isEraser);
+            if (item.type === 'stroke') {
+              strokeSegment(item.userId, item.x1, item.y1, item.x2, item.y2, item.color, item.size, item.isEraser);
+            }
           });
+          flattenLayersToMain();
         }
 
+        // Image Handling Functions
+        function addImageToCanvas(imgData) {
+          const img = new Image();
+          img.src = imgData.src;
+          const obj = { ...imgData, imgElement: img };
+          
+          img.onload = () => {
+            imageObjects.push(obj);
+            flattenLayersToMain();
+          };
+        }
+
+        function getHitHandle(obj, x, y) {
+          const hX = obj.x + obj.w - HANDLE_SIZE;
+          const hY = obj.y + obj.h - HANDLE_SIZE;
+          return x >= hX && x <= hX + HANDLE_SIZE && y >= hY && y <= hY + HANDLE_SIZE;
+        }
+
+        function getHitImage(x, y) {
+          for (let i = imageObjects.length - 1; i >= 0; i--) {
+            const obj = imageObjects[i];
+            if (x >= obj.x && x <= obj.x + obj.w && y >= obj.y && y <= obj.y + obj.h) {
+              return obj;
+            }
+          }
+          return null;
+        }
+
+        // Mouse Event Handling
+        mainCanvas.addEventListener('mousedown', (e) => {
+          const x = e.clientX;
+          const y = e.clientY;
+
+          // Check if clicking resize handle or existing image
+          if (selectedImg && getHitHandle(selectedImg, x, y)) {
+            dragMode = 'resize';
+            return;
+          }
+
+          const hitImg = getHitImage(x, y);
+          if (hitImg) {
+            selectedImg = hitImg;
+            dragMode = 'move';
+            dragOffset = { x: x - selectedImg.x, y: y - selectedImg.y };
+            flattenLayersToMain();
+            return;
+          }
+
+          // Deselect image if clicking outside
+          if (selectedImg) {
+            selectedImg = null;
+            flattenLayersToMain();
+          }
+
+          // Otherwise start drawing
+          drawing = true;
+          currentStrokeId = Math.random().toString(36).substring(2, 10);
+          undoStack.push(currentStrokeId);
+          redoStack.length = 0;
+          lastPos = { x, y };
+          handlePointerMove(e);
+        });
+
         function handlePointerMove(e) {
+          const x = e.clientX;
+          const y = e.clientY;
+
+          if (dragMode === 'move' && selectedImg) {
+            selectedImg.x = x - dragOffset.x;
+            selectedImg.y = y - dragOffset.y;
+            flattenLayersToMain();
+            syncImageUpdate(selectedImg);
+            return;
+          }
+
+          if (dragMode === 'resize' && selectedImg) {
+            selectedImg.w = Math.max(30, x - selectedImg.x);
+            selectedImg.h = Math.max(30, y - selectedImg.y);
+            flattenLayersToMain();
+            syncImageUpdate(selectedImg);
+            return;
+          }
+
           if (!drawing) return;
 
-          const currentPos = { x: e.clientX, y: e.clientY };
+          const currentPos = { x, y };
           if (!lastPos) lastPos = currentPos;
 
           const size = parseInt(brushSize.value);
@@ -214,20 +315,49 @@ app.get('/', (req, res) => {
           lastPos = currentPos;
         }
 
-        mainCanvas.addEventListener('mousedown', (e) => {
-          drawing = true;
-          currentStrokeId = Math.random().toString(36).substring(2, 10);
-          undoStack.push(currentStrokeId);
-          redoStack.length = 0; // Clear redo on new stroke
-          lastPos = { x: e.clientX, y: e.clientY };
-          handlePointerMove(e);
-        });
-
         mainCanvas.addEventListener('mousemove', handlePointerMove);
 
         window.addEventListener('mouseup', () => {
           drawing = false;
+          dragMode = null;
           lastPos = null;
+        });
+
+        function syncImageUpdate(imgObj) {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({
+              type: 'update_image',
+              id: imgObj.id,
+              x: imgObj.x,
+              y: imgObj.y,
+              w: imgObj.w,
+              h: imgObj.h
+            }));
+          }
+        }
+
+        // Image Upload Event
+        imgUpload.addEventListener('change', (e) => {
+          const file = e.target.files[0];
+          if (file) {
+            const reader = new FileReader();
+            reader.onload = (event) => {
+              const newImgData = {
+                id: Math.random().toString(36).substring(2, 10),
+                src: event.target.result,
+                x: 100, y: 100,
+                w: 200, h: 200
+              };
+
+              addImageToCanvas(newImgData);
+              selectedImg = imageObjects[imageObjects.length - 1];
+
+              if (socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({ type: 'add_image', image: newImgData }));
+              }
+            };
+            reader.readAsDataURL(file);
+          }
         });
 
         // Undo & Redo Handlers
@@ -252,30 +382,15 @@ app.get('/', (req, res) => {
         undoBtn.addEventListener('click', triggerUndo);
         redoBtn.addEventListener('click', triggerRedo);
 
-        // Keyboard Shortcuts (Ctrl+Z / Ctrl+Y)
         window.addEventListener('keydown', (e) => {
           if (e.ctrlKey && e.key === 'z') { e.preventDefault(); triggerUndo(); }
           if (e.ctrlKey && e.key === 'y') { e.preventDefault(); triggerRedo(); }
         });
 
-        // Theme & Background Upload Handlers
         bgSelect.addEventListener('change', (e) => {
           document.body.className = '';
-          bgImageLayer.style.display = 'none';
           if (e.target.value !== 'dark') {
             document.body.classList.add('theme-' + e.target.value);
-          }
-        });
-
-        bgUpload.addEventListener('change', (e) => {
-          const file = e.target.files[0];
-          if (file) {
-            const reader = new FileReader();
-            reader.onload = (event) => {
-              bgImageLayer.src = event.target.result;
-              bgImageLayer.style.display = 'block';
-            };
-            reader.readAsDataURL(file);
           }
         });
 
@@ -290,11 +405,30 @@ app.get('/', (req, res) => {
 
           if (message.type === 'init') {
             myUserId = message.userId;
+            
+            // Load persistent images
+            if (message.images) {
+              message.images.forEach(img => addImageToCanvas(img));
+            }
+            
             rebuildFromHistory(message.history);
           } 
           else if (message.type === 'stroke') {
             if (message.userId !== myUserId) {
               strokeSegment(message.userId, message.x1, message.y1, message.x2, message.y2, message.color, message.size, message.isEraser);
+            }
+          }
+          else if (message.type === 'add_image') {
+            addImageToCanvas(message.image);
+          }
+          else if (message.type === 'update_image') {
+            const target = imageObjects.find(img => img.id === message.id);
+            if (target) {
+              target.x = message.x;
+              target.y = message.y;
+              target.w = message.w;
+              target.h = message.h;
+              flattenLayersToMain();
             }
           }
           else if (message.type === 'update_history') {
@@ -307,18 +441,19 @@ app.get('/', (req, res) => {
   `);
 });
 
-// Stashed items for user undo/redo management
+let imageStore = [];
 let undoneHistory = [];
 
 wss.on('connection', (ws) => {
   const userId = Math.random().toString(36).substring(2, 10);
-  ws.send(JSON.stringify({ type: 'init', userId, history: drawHistory }));
+  ws.send(JSON.stringify({ type: 'init', userId, history: drawHistory, images: imageStore }));
 
   ws.on('message', (msg) => {
     const data = JSON.parse(msg.toString());
 
     if (data.type === 'stroke') {
       const strokeData = {
+        type: 'stroke',
         strokeId: data.strokeId,
         userId,
         x1: data.x1, y1: data.y1,
@@ -332,12 +467,34 @@ wss.on('connection', (ws) => {
 
       wss.clients.forEach((client) => {
         if (client.readyState === 1) {
-          client.send(JSON.stringify({ type: 'stroke', ...strokeData }));
+          client.send(JSON.stringify(strokeData));
         }
       });
     } 
+    else if (data.type === 'add_image') {
+      imageStore.push(data.image);
+      wss.clients.forEach((client) => {
+        if (client !== ws && client.readyState === 1) {
+          client.send(JSON.stringify(data));
+        }
+      });
+    }
+    else if (data.type === 'update_image') {
+      const target = imageStore.find(img => img.id === data.id);
+      if (target) {
+        target.x = data.x;
+        target.y = data.y;
+        target.w = data.w;
+        target.h = data.h;
+      }
+
+      wss.clients.forEach((client) => {
+        if (client !== ws && client.readyState === 1) {
+          client.send(JSON.stringify(data));
+        }
+      });
+    }
     else if (data.type === 'undo') {
-      // Remove strokes associated with the undo action
       const removed = drawHistory.filter(item => item.strokeId === data.strokeId);
       drawHistory = drawHistory.filter(item => item.strokeId !== data.strokeId);
       undoneHistory.push(...removed);
@@ -349,7 +506,6 @@ wss.on('connection', (ws) => {
       });
     }
     else if (data.type === 'redo') {
-      // Restore strokes associated with the redo action
       const restored = undoneHistory.filter(item => item.strokeId === data.strokeId);
       undoneHistory = undoneHistory.filter(item => item.strokeId !== data.strokeId);
       drawHistory.push(...restored);
