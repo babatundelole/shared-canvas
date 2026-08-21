@@ -109,12 +109,16 @@ app.get('/', (req, res) => {
 
         const userLayers = {};
         
-        let imageObjects = []; // Array of { id, src, x, y, w, h, angle, imgElement }
+        let imageObjects = [];
         let selectedImg = null;
-        let dragMode = null; // 'move', 'resize', or 'rotate'
+        let dragMode = null;
         let dragOffset = { x: 0, y: 0 };
-        const HANDLE_SIZE = 10;
+        const HANDLE_SIZE = 12;
         const ROTATE_HANDLE_OFFSET = 30;
+
+        // Render & Network Throttling variables
+        let renderRequested = false;
+        let lastNetworkSend = 0;
 
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
         const socket = new WebSocket(\`\${protocol}//\${location.host}\`);
@@ -140,7 +144,16 @@ app.get('/', (req, res) => {
           return userLayers[userId];
         }
 
+        // Render loop scheduled with requestAnimationFrame to prevent lag
+        function requestRender() {
+          if (!renderRequested) {
+            renderRequested = true;
+            requestAnimationFrame(flattenLayersToMain);
+          }
+        }
+
         function flattenLayersToMain() {
+          renderRequested = false;
           mainCtx.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
           
           imageObjects.forEach(obj => {
@@ -158,11 +171,11 @@ app.get('/', (req, res) => {
                 mainCtx.lineWidth = 2;
                 mainCtx.strokeRect(-obj.w / 2, -obj.h / 2, obj.w, obj.h);
 
-                // Resize handle (Bottom-Right)
+                // Resize handle
                 mainCtx.fillStyle = '#00ffcc';
                 mainCtx.fillRect(obj.w / 2 - HANDLE_SIZE, obj.h / 2 - HANDLE_SIZE, HANDLE_SIZE, HANDLE_SIZE);
 
-                // Rotate handle (Top-Center stem & circle)
+                // Rotate handle
                 mainCtx.beginPath();
                 mainCtx.moveTo(0, -obj.h / 2);
                 mainCtx.lineTo(0, -obj.h / 2 - ROTATE_HANDLE_OFFSET);
@@ -204,7 +217,7 @@ app.get('/', (req, res) => {
           ctx.stroke();
           ctx.restore();
 
-          flattenLayersToMain();
+          requestRender();
         }
 
         function clearAllLayers() {
@@ -220,7 +233,7 @@ app.get('/', (req, res) => {
               strokeSegment(item.userId, item.x1, item.y1, item.x2, item.y2, item.color, item.size, item.isEraser);
             }
           });
-          flattenLayersToMain();
+          requestRender();
         }
 
         function addImageToCanvas(imgData) {
@@ -230,7 +243,7 @@ app.get('/', (req, res) => {
           
           img.onload = () => {
             imageObjects.push(obj);
-            flattenLayersToMain();
+            requestRender();
           };
         }
 
@@ -249,15 +262,13 @@ app.get('/', (req, res) => {
         function getHitHandle(obj, worldX, worldY) {
           const local = toLocalCoords(obj, worldX, worldY);
           
-          // Resize handle (bottom right)
-          if (local.x >= obj.w / 2 - HANDLE_SIZE && local.x <= obj.w / 2 &&
-              local.y >= obj.h / 2 - HANDLE_SIZE && local.y <= obj.h / 2) {
+          if (local.x >= obj.w / 2 - HANDLE_SIZE && local.x <= obj.w / 2 + 5 &&
+              local.y >= obj.h / 2 - HANDLE_SIZE && local.y <= obj.h / 2 + 5) {
             return 'resize';
           }
           
-          // Rotate handle (top center)
           const rotY = -obj.h / 2 - ROTATE_HANDLE_OFFSET;
-          if (Math.hypot(local.x - 0, local.y - rotY) <= 10) {
+          if (Math.hypot(local.x - 0, local.y - rotY) <= 12) {
             return 'rotate';
           }
 
@@ -293,13 +304,13 @@ app.get('/', (req, res) => {
             selectedImg = hitImg;
             dragMode = 'move';
             dragOffset = { x: x - selectedImg.x, y: y - selectedImg.y };
-            flattenLayersToMain();
+            requestRender();
             return;
           }
 
           if (selectedImg) {
             selectedImg = null;
-            flattenLayersToMain();
+            requestRender();
           }
 
           drawing = true;
@@ -317,8 +328,8 @@ app.get('/', (req, res) => {
           if (dragMode === 'move' && selectedImg) {
             selectedImg.x = x - dragOffset.x;
             selectedImg.y = y - dragOffset.y;
-            flattenLayersToMain();
-            syncImageUpdate(selectedImg);
+            requestRender();
+            syncImageUpdateThrottled(selectedImg);
             return;
           }
 
@@ -326,8 +337,8 @@ app.get('/', (req, res) => {
             const local = toLocalCoords(selectedImg, x, y);
             selectedImg.w = Math.max(30, local.x * 2);
             selectedImg.h = Math.max(30, local.y * 2);
-            flattenLayersToMain();
-            syncImageUpdate(selectedImg);
+            requestRender();
+            syncImageUpdateThrottled(selectedImg);
             return;
           }
 
@@ -335,8 +346,8 @@ app.get('/', (req, res) => {
             const cx = selectedImg.x + selectedImg.w / 2;
             const cy = selectedImg.y + selectedImg.h / 2;
             selectedImg.angle = Math.atan2(y - cy, x - cx) + Math.PI / 2;
-            flattenLayersToMain();
-            syncImageUpdate(selectedImg);
+            requestRender();
+            syncImageUpdateThrottled(selectedImg);
             return;
           }
 
@@ -367,10 +378,23 @@ app.get('/', (req, res) => {
         mainCanvas.addEventListener('mousemove', handlePointerMove);
 
         window.addEventListener('mouseup', () => {
+          if (dragMode && selectedImg) {
+            // Guarantee final exact state is sent on release
+            syncImageUpdate(selectedImg);
+          }
           drawing = false;
           dragMode = null;
           lastPos = null;
         });
+
+        // Throttle WebSocket updates to 30ms intervals during active drag
+        function syncImageUpdateThrottled(imgObj) {
+          const now = Date.now();
+          if (now - lastNetworkSend > 30) {
+            syncImageUpdate(imgObj);
+            lastNetworkSend = now;
+          }
+        }
 
         function syncImageUpdate(imgObj) {
           if (socket.readyState === WebSocket.OPEN) {
@@ -477,7 +501,7 @@ app.get('/', (req, res) => {
               target.w = message.w;
               target.h = message.h;
               target.angle = message.angle;
-              flattenLayersToMain();
+              requestRender();
             }
           }
           else if (message.type === 'update_history') {
