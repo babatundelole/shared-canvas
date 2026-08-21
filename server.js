@@ -7,8 +7,8 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
 let drawHistory = [];
-let mediaStore = []; // Stores images and video elements
-const connectedUsers = {}; // Stores user details: { userId: { color, x, y, name } }
+let mediaStore = []; 
+const connectedUsers = {}; 
 
 function getRandomColor() {
   const letters = '0123456789ABCDEF';
@@ -24,7 +24,7 @@ app.get('/', (req, res) => {
     <!DOCTYPE html>
     <html>
     <head>
-      <title>Shared Canvas with Video File Upload</title>
+      <title>Shared Canvas with Silent Playable Video & Image Transforms</title>
       <style>
         body { margin: 0; background: #111; overflow: hidden; font-family: sans-serif; transition: background 0.3s; }
         body.theme-light { background: #f4f4f9; }
@@ -43,7 +43,7 @@ app.get('/', (req, res) => {
         .canvas-video-wrapper {
           position: absolute;
           transform-origin: center center;
-          pointer-events: auto;
+          pointer-events: none;
           box-sizing: border-box;
         }
 
@@ -54,10 +54,7 @@ app.get('/', (req, res) => {
           display: block;
           object-fit: cover;
           background: #000;
-        }
-
-        .canvas-video-wrapper.selected {
-          outline: 2px solid #00ffcc;
+          pointer-events: none;
         }
 
         #toolbar {
@@ -246,6 +243,17 @@ app.get('/', (req, res) => {
               mainCtx.restore();
             } else if (obj.mediaType === 'video') {
               updateVideoDOMElement(obj);
+
+              mainCtx.save();
+              const cx = obj.x + obj.w / 2;
+              const cy = obj.y + obj.h / 2;
+              mainCtx.translate(cx, cy);
+              mainCtx.rotate(obj.angle || 0);
+
+              if (obj === selectedMedia && obj.ownerId === myUserId) {
+                drawSelectionControls(obj);
+              }
+              mainCtx.restore();
             }
           });
 
@@ -283,16 +291,15 @@ app.get('/', (req, res) => {
 
             const video = document.createElement('video');
             video.src = obj.src;
-            video.controls = true;
-            video.autoplay = false;
-            video.muted = false;
-
-            video.onplay = () => syncVideoState(obj.id, 'play', video.currentTime);
-            video.onpause = () => syncVideoState(obj.id, 'pause', video.currentTime);
-            video.onseeked = () => syncVideoState(obj.id, 'seek', video.currentTime);
+            video.muted = true;         // Completely silent
+            video.autoplay = true;      // Auto-plays
+            video.loop = true;          // Continuous playback
+            video.playsInline = true;
 
             wrapper.appendChild(video);
             videoContainer.appendChild(wrapper);
+            
+            video.play().catch(e => console.log('Autoplay blocked:', e));
           }
 
           wrapper.style.left = obj.x + 'px';
@@ -300,23 +307,6 @@ app.get('/', (req, res) => {
           wrapper.style.width = obj.w + 'px';
           wrapper.style.height = obj.h + 'px';
           wrapper.style.transform = \`rotate(\${obj.angle || 0}rad)\`;
-
-          if (obj === selectedMedia && obj.ownerId === myUserId) {
-            wrapper.classList.add('selected');
-          } else {
-            wrapper.classList.remove('selected');
-          }
-        }
-
-        function syncVideoState(id, action, time) {
-          if (socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({
-              type: 'video_control',
-              id,
-              action,
-              time
-            }));
-          }
         }
 
         function renderCursors() {
@@ -783,17 +773,6 @@ app.get('/', (req, res) => {
           else if (message.type === 'delete_media') {
             removeMediaById(message.id);
           }
-          else if (message.type === 'video_control') {
-            const wrapper = document.getElementById('video_wrapper_' + message.id);
-            if (wrapper) {
-              const video = wrapper.querySelector('video');
-              if (video) {
-                video.currentTime = message.time;
-                if (message.action === 'play') video.play();
-                if (message.action === 'pause') video.pause();
-              }
-            }
-          }
           else if (message.type === 'update_history') {
             rebuildFromHistory(message.history);
           }
@@ -911,13 +890,6 @@ wss.on('connection', (ws) => {
           }
         });
       }
-    }
-    else if (data.type === 'video_control') {
-      wss.clients.forEach((client) => {
-        if (client !== ws && client.readyState === 1) {
-          client.send(JSON.stringify(data));
-        }
-      });
     }
     else if (data.type === 'undo') {
       const removed = drawHistory.filter(item => item.strokeId === data.strokeId);
