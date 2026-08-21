@@ -7,6 +7,7 @@ const wss = new WebSocketServer({ server });
 
 let drawHistory = [];
 let mediaStore = [];
+let chatHistory = [];
 const connectedUsers = {};
 
 function getRandomColor() {
@@ -80,14 +81,80 @@ app.get('/', (req, res) => {
         #deleteMediaBtn:hover { background: #e74c3c; }
         input[type="file"] { display: none; }
         .control-group { display: flex; align-items: center; gap: 4px; }
+
+        /* Profile Modal */
+        #profileModal {
+          position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+          background: rgba(0,0,0,0.7); z-index: 100; display: flex;
+          align-items: center; justify-content: center;
+        }
+        .modal-content {
+          background: #222; color: white; padding: 20px 24px; border-radius: 10px;
+          box-shadow: 0 8px 24px rgba(0,0,0,0.6); display: flex; flex-direction: column; gap: 14px;
+          min-width: 280px; border: 1px solid #444;
+        }
+        .modal-content h3 { margin: 0; font-size: 16px; color: #00ffcc; }
+        .modal-content input[type="text"] {
+          background: #111; border: 1px solid #555; color: #fff; padding: 8px 10px;
+          border-radius: 4px; font-size: 13px; outline: none;
+        }
+
+        /* Chat Drawer */
+        #chatDrawer {
+          position: fixed; bottom: 15px; right: 15px; z-index: 10;
+          width: 300px; background: rgba(0,0,0,0.9); border: 1px solid #444;
+          border-radius: 8px; display: flex; flex-direction: column; overflow: hidden;
+          box-shadow: 0 4px 15px rgba(0,0,0,0.6); transition: height 0.3s ease;
+        }
+        #chatDrawer.collapsed { height: 38px !important; }
+        #chatHeader {
+          background: #222; padding: 10px 14px; font-weight: bold; font-size: 13px;
+          color: #fff; cursor: pointer; display: flex; justify-content: space-between;
+          align-items: center; user-select: none; border-bottom: 1px solid #333;
+        }
+        #chatBadge {
+          background: #e74c3c; color: white; font-size: 10px; padding: 2px 6px;
+          border-radius: 10px; display: none;
+        }
+        #chatMessages {
+          height: 220px; overflow-y: auto; padding: 10px; display: flex;
+          flex-direction: column; gap: 8px; font-size: 12px;
+        }
+        .chat-msg { word-wrap: break-word; color: #ddd; line-height: 1.4; }
+        .chat-msg .author { font-weight: bold; margin-right: 4px; }
+        .chat-msg.system { color: #888; font-style: italic; font-size: 11px; }
+        #chatInputContainer { display: flex; border-top: 1px solid #333; }
+        #chatInput {
+          flex: 1; background: #111; border: none; color: #fff; padding: 8px 10px;
+          font-size: 12px; outline: none;
+        }
+        #chatSendBtn {
+          background: #00ffcc; color: #111; border: none; font-weight: bold;
+          padding: 0 12px; cursor: pointer; font-size: 12px;
+        }
+        #chatSendBtn:hover { background: #00cca3; }
       </style>
     </head>
     <body>
+      <div id="profileModal">
+        <div class="modal-content">
+          <h3>Set Up Profile</h3>
+          <label style="font-size: 12px; color: #aaa;">Display Name:</label>
+          <input type="text" id="modalNameInput" placeholder="Enter name...">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <label style="font-size: 12px; color: #aaa;">Cursor Color:</label>
+            <input type="color" id="modalColorInput">
+          </div>
+          <button id="saveProfileBtn" style="padding: 8px; background: #00ffcc; color: #111;">Join Canvas</button>
+        </div>
+      </div>
+
       <div id="toolbar">
         <span id="status">Connecting...</span>
         <span id="userBadge">👥 1 Online</span>
 
         <div class="control-group">
+          <label>Brush:</label>
           <input type="color" id="colorPicker" value="#00ffcc">
         </div>
 
@@ -111,10 +178,23 @@ app.get('/', (req, res) => {
         <label for="imgUpload" class="btn">Add Image</label>
         <input type="file" id="imgUpload" accept="image/*">
 
-        <label for="videoUpload" class="btn">Add Video File</label>
+        <label for="videoUpload" class="btn">Add Video</label>
         <input type="file" id="videoUpload" accept="video/*">
 
         <button id="deleteMediaBtn">Delete Selected</button>
+        <button id="editProfileBtn">Profile</button>
+      </div>
+
+      <div id="chatDrawer" class="collapsed">
+        <div id="chatHeader">
+          <span>💬 Room Chat</span>
+          <span id="chatBadge">0</span>
+        </div>
+        <div id="chatMessages"></div>
+        <div id="chatInputContainer">
+          <input type="text" id="chatInput" placeholder="Type a message..." maxlength="150">
+          <button id="chatSendBtn">Send</button>
+        </div>
       </div>
 
       <div id="overlayContainer"></div>
@@ -139,6 +219,24 @@ app.get('/', (req, res) => {
         const imgUpload = document.getElementById('imgUpload');
         const videoUpload = document.getElementById('videoUpload');
         const deleteMediaBtn = document.getElementById('deleteMediaBtn');
+        
+        const profileModal = document.getElementById('profileModal');
+        const modalNameInput = document.getElementById('modalNameInput');
+        const modalColorInput = document.getElementById('modalColorInput');
+        const saveProfileBtn = document.getElementById('saveProfileBtn');
+        const editProfileBtn = document.getElementById('editProfileBtn');
+
+        const chatDrawer = document.getElementById('chatDrawer');
+        const chatHeader = document.getElementById('chatHeader');
+        const chatBadge = document.getElementById('chatBadge');
+        const chatMessages = document.getElementById('chatMessages');
+        const chatInput = document.getElementById('chatInput');
+        const chatSendBtn = document.getElementById('chatSendBtn');
+
+        let myUserId = null;
+        let myName = 'User';
+        let myCursorColor = '#00ffcc';
+        let unreadCount = 0;
 
         function resizeCanvases() {
           mainCanvas.width = window.innerWidth;
@@ -151,7 +249,6 @@ app.get('/', (req, res) => {
 
         window.addEventListener('resize', resizeCanvases);
 
-        let myUserId = null;
         let isEraserMode = false;
         let drawing = false;
         let lastPos = null;
@@ -187,6 +284,77 @@ app.get('/', (req, res) => {
           status.innerText = "FAILED";
           status.style.color = "#ff0000";
         };
+
+        // Profile Setup
+        saveProfileBtn.addEventListener('click', () => {
+          if (modalNameInput.value.trim()) {
+            myName = modalNameInput.value.trim();
+          }
+          myCursorColor = modalColorInput.value;
+          profileModal.style.display = 'none';
+
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({
+              type: 'update_profile',
+              name: myName,
+              color: myCursorColor
+            }));
+          }
+        });
+
+        editProfileBtn.addEventListener('click', () => {
+          modalNameInput.value = myName;
+          modalColorInput.value = myCursorColor;
+          profileModal.style.display = 'flex';
+        });
+
+        // Chat Toggle & Messaging
+        chatHeader.addEventListener('click', () => {
+          chatDrawer.classList.toggle('collapsed');
+          if (!chatDrawer.classList.contains('collapsed')) {
+            unreadCount = 0;
+            chatBadge.style.display = 'none';
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+          }
+        });
+
+        function sendChatMessage() {
+          const text = chatInput.value.trim();
+          if (text && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'chat_msg', text }));
+            chatInput.value = '';
+          }
+        }
+
+        chatSendBtn.addEventListener('click', sendChatMessage);
+        chatInput.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') sendChatMessage();
+        });
+
+        function appendChatMessage(author, text, color, isSystem = false) {
+          const msgDiv = document.createElement('div');
+          msgDiv.className = 'chat-msg' + (isSystem ? ' system' : '');
+          
+          if (isSystem) {
+            msgDiv.innerText = text;
+          } else {
+            const authorSpan = document.createElement('span');
+            authorSpan.className = 'author';
+            authorSpan.style.color = color || '#00ffcc';
+            authorSpan.innerText = author + ':';
+            msgDiv.appendChild(authorSpan);
+            msgDiv.appendChild(document.createTextNode(' ' + text));
+          }
+
+          chatMessages.appendChild(msgDiv);
+          chatMessages.scrollTop = chatMessages.scrollHeight;
+
+          if (chatDrawer.classList.contains('collapsed') && !isSystem) {
+            unreadCount++;
+            chatBadge.innerText = unreadCount;
+            chatBadge.style.display = 'inline-block';
+          }
+        }
 
         function getUserLayer(userId) {
           if (!userLayers[userId]) {
@@ -305,7 +473,6 @@ app.get('/', (req, res) => {
             cursorCtx.save();
             cursorCtx.translate(cursor.x, cursor.y);
 
-            // Draw Pointer Arrow
             cursorCtx.beginPath();
             cursorCtx.moveTo(0, 0);
             cursorCtx.lineTo(0, 16);
@@ -322,7 +489,6 @@ app.get('/', (req, res) => {
             cursorCtx.lineWidth = 1.5;
             cursorCtx.stroke();
 
-            // Draw User Tag
             const label = cursor.name || ('User ' + uid.substring(0, 4));
             cursorCtx.font = '11px sans-serif';
             cursorCtx.fillStyle = 'rgba(0, 0, 0, 0.75)';
@@ -568,7 +734,6 @@ app.get('/', (req, res) => {
           lastPos = currentPos;
         }
 
-        // Track cursor even when mouse is simply hovering over canvas
         mainCanvas.addEventListener('mousemove', handlePointerMove);
 
         window.addEventListener('mouseup', () => {
@@ -683,6 +848,8 @@ app.get('/', (req, res) => {
         redoBtn.addEventListener('click', triggerRedo);
 
         window.addEventListener('keydown', (e) => {
+          if (document.activeElement === chatInput || document.activeElement === modalNameInput) return;
+
           if (e.key === 'Delete' || e.key === 'Backspace') {
             if (selectedMedia && selectedMedia.ownerId === myUserId) {
               e.preventDefault();
@@ -711,11 +878,21 @@ app.get('/', (req, res) => {
 
           if (message.type === 'init') {
             myUserId = message.userId;
+            myName = message.user.name;
+            myCursorColor = message.user.color;
+
+            modalNameInput.value = myName;
+            modalColorInput.value = myCursorColor;
+
             remoteCursors = message.users || {};
             userBadge.innerText = \`👥 \${Object.keys(remoteCursors).length} Online\`;
 
             if (message.media) {
               message.media.forEach(m => addMediaToCanvas(m));
+            }
+
+            if (message.chats) {
+              message.chats.forEach(c => appendChatMessage(c.author, c.text, c.color));
             }
             
             rebuildFromHistory(message.history);
@@ -724,12 +901,27 @@ app.get('/', (req, res) => {
           else if (message.type === 'user_joined') {
             remoteCursors[message.user.userId] = message.user;
             userBadge.innerText = \`👥 \${Object.keys(remoteCursors).length} Online\`;
+            appendChatMessage(null, \`\${message.user.name} joined the canvas\`, null, true);
             renderCursors();
           }
           else if (message.type === 'user_left') {
+            const leftUser = remoteCursors[message.userId];
+            if (leftUser) {
+              appendChatMessage(null, \`\${leftUser.name} left\`, null, true);
+            }
             delete remoteCursors[message.userId];
             userBadge.innerText = \`👥 \${Object.keys(remoteCursors).length} Online\`;
             renderCursors();
+          }
+          else if (message.type === 'update_profile') {
+            if (remoteCursors[message.userId]) {
+              remoteCursors[message.userId].name = message.name;
+              remoteCursors[message.userId].color = message.color;
+              renderCursors();
+            }
+          }
+          else if (message.type === 'chat_msg') {
+            appendChatMessage(message.author, message.text, message.color);
           }
           else if (message.type === 'cursor_move') {
             if (remoteCursors[message.userId]) {
@@ -790,8 +982,10 @@ wss.on('connection', (ws) => {
   ws.send(JSON.stringify({ 
     type: 'init', 
     userId, 
+    user: connectedUsers[userId],
     history: drawHistory, 
     media: mediaStore,
+    chats: chatHistory,
     users: connectedUsers 
   }));
 
@@ -807,7 +1001,44 @@ wss.on('connection', (ws) => {
   ws.on('message', (msg) => {
     const data = JSON.parse(msg.toString());
 
-    if (data.type === 'cursor_move') {
+    if (data.type === 'update_profile') {
+      if (connectedUsers[userId]) {
+        connectedUsers[userId].name = data.name;
+        connectedUsers[userId].color = data.color;
+
+        wss.clients.forEach((client) => {
+          if (client.readyState === 1) {
+            client.send(JSON.stringify({
+              type: 'update_profile',
+              userId,
+              name: data.name,
+              color: data.color
+            }));
+          }
+        });
+      }
+    }
+    else if (data.type === 'chat_msg') {
+      const user = connectedUsers[userId];
+      const chatItem = {
+        author: user ? user.name : 'User',
+        text: data.text,
+        color: user ? user.color : '#00ffcc'
+      };
+      
+      chatHistory.push(chatItem);
+      if (chatHistory.length > 50) chatHistory.shift();
+
+      wss.clients.forEach((client) => {
+        if (client.readyState === 1) {
+          client.send(JSON.stringify({
+            type: 'chat_msg',
+            ...chatItem
+          }));
+        }
+      });
+    }
+    else if (data.type === 'cursor_move') {
       if (connectedUsers[userId]) {
         connectedUsers[userId].x = data.x;
         connectedUsers[userId].y = data.y;
