@@ -1,7 +1,6 @@
 const express = require('express');
 const http = require('http');
 const { WebSocketServer } = require('ws');
-const { v4: uuidv4 } = require('crypto'); // Built-in Node crypto module
 
 const app = express();
 const server = http.createServer(app);
@@ -25,6 +24,7 @@ app.get('/', (req, res) => {
           background: rgba(0,0,0,0.85); padding: 10px 14px;
           border-radius: 8px; display: flex; align-items: center; gap: 12px;
           color: #fff; font-size: 14px; box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+          user-select: none;
         }
         #status { font-weight: bold; font-size: 12px; color: #00ff00; }
         
@@ -90,25 +90,32 @@ app.get('/', (req, res) => {
 
         function redrawAll() {
           ctx.clearRect(0, 0, canvas.width, canvas.height);
-          localHistory.forEach(pt => {
-            ctx.fillStyle = pt.color;
-            ctx.beginPath();
-            ctx.arc(pt.x, pt.y, pt.size, 0, Math.PI * 2);
-            ctx.fill();
-          });
+          localHistory.forEach(pt => drawSinglePoint(pt));
+        }
+
+        function drawSinglePoint(pt) {
+          ctx.fillStyle = pt.color;
+          ctx.beginPath();
+          ctx.arc(pt.x, pt.y, pt.size, 0, Math.PI * 2);
+          ctx.fill();
         }
 
         function handlePointer(x, y) {
           const size = parseInt(brushSize.value);
 
           if (isEraserMode) {
-            // Send request to server to remove ONLY my own points within radius
             if (socket.readyState === WebSocket.OPEN) {
               socket.send(JSON.stringify({ type: 'erase_mine', x, y, radius: size }));
             }
           } else {
-            // Draw new point
             const color = colorPicker.value;
+            const tempPoint = { userId: myUserId, x, y, color, size };
+
+            // 1. Draw locally INSTANTLY so there is zero delay
+            drawSinglePoint(tempPoint);
+            localHistory.push(tempPoint);
+
+            // 2. Send to server in background
             if (socket.readyState === WebSocket.OPEN) {
               socket.send(JSON.stringify({ type: 'draw', x, y, color, size }));
             }
@@ -134,11 +141,11 @@ app.get('/', (req, res) => {
             redrawAll();
           } 
           else if (message.type === 'draw') {
-            localHistory.push(message.point);
-            ctx.fillStyle = message.point.color;
-            ctx.beginPath();
-            ctx.arc(message.point.x, message.point.y, message.point.size, 0, Math.PI * 2);
-            ctx.fill();
+            // Only draw incoming points from OTHER users (since local points are already rendered)
+            if (message.point.userId !== myUserId) {
+              localHistory.push(message.point);
+              drawSinglePoint(message.point);
+            }
           }
           else if (message.type === 'update_history') {
             localHistory = message.history;
@@ -152,10 +159,7 @@ app.get('/', (req, res) => {
 });
 
 wss.on('connection', (ws) => {
-  // Generate a unique ID for this client session
   const userId = Math.random().toString(36).substring(2, 10);
-
-  // Send client their ID + existing global drawing history
   ws.send(JSON.stringify({ type: 'init', userId, history: drawHistory }));
 
   ws.on('message', (msg) => {
@@ -173,7 +177,6 @@ wss.on('connection', (ws) => {
 
       drawHistory.push(point);
 
-      // Broadcast new point to everyone
       wss.clients.forEach((client) => {
         if (client.readyState === 1) {
           client.send(JSON.stringify({ type: 'draw', point }));
@@ -181,15 +184,13 @@ wss.on('connection', (ws) => {
       });
     } 
     else if (data.type === 'erase_mine') {
-      // Filter out points that belong to THIS user and fall within the eraser circle
       const beforeCount = drawHistory.length;
       drawHistory = drawHistory.filter((pt) => {
-        if (pt.userId !== userId) return true; // KEEP other users' points untouched
+        if (pt.userId !== userId) return true;
         const distance = Math.hypot(pt.x - data.x, pt.y - data.y);
-        return distance > data.radius; // Delete my point if inside eraser radius
+        return distance > data.radius;
       });
 
-      // If points were erased, notify ALL clients to refresh canvas
       if (drawHistory.length !== beforeCount) {
         wss.clients.forEach((client) => {
           if (client.readyState === 1) {
