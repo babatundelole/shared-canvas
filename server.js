@@ -1,14 +1,14 @@
 const express = require('express');
 const http = require('http');
 const { WebSocketServer } = require('ws');
-
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
 let drawHistory = [];
-let mediaStore = []; 
-const connectedUsers = {}; 
+let mediaStore = [];
+let voiceNotes = []; // Stores spatial voice notes
+const connectedUsers = {};
 
 function getRandomColor() {
   const letters = '0123456789ABCDEF';
@@ -24,7 +24,7 @@ app.get('/', (req, res) => {
     <!DOCTYPE html>
     <html>
     <head>
-      <title>Shared Canvas with Silent Playable Video & Image Transforms</title>
+      <title>Shared Canvas with Spatial Voice Memos</title>
       <style>
         body { margin: 0; background: #111; overflow: hidden; font-family: sans-serif; transition: background 0.3s; }
         body.theme-light { background: #f4f4f9; }
@@ -38,7 +38,7 @@ app.get('/', (req, res) => {
         canvas { display: block; position: absolute; top: 0; left: 0; }
         #mainCanvas { z-index: 2; }
         #cursorCanvas { z-index: 3; pointer-events: none; }
-        #videoOverlayContainer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; }
+        #overlayContainer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; }
 
         .canvas-video-wrapper {
           position: absolute;
@@ -55,6 +55,80 @@ app.get('/', (req, res) => {
           object-fit: cover;
           background: #000;
           pointer-events: none;
+        }
+
+        /* Voice Note Tiles */
+        .voice-note-tile {
+          position: absolute;
+          width: 220px;
+          height: 60px;
+          background: rgba(20, 20, 25, 0.92);
+          border: 1px solid #00ffcc;
+          border-radius: 30px;
+          display: flex;
+          align-items: center;
+          padding: 0 12px;
+          gap: 10px;
+          box-shadow: 0 6px 16px rgba(0,0,0,0.6);
+          pointer-events: auto;
+          user-select: none;
+          z-index: 5;
+          box-sizing: border-box;
+          backdrop-filter: blur(8px);
+        }
+
+        .voice-play-btn {
+          width: 38px;
+          height: 38px;
+          border-radius: 50%;
+          background: #00ffcc;
+          border: none;
+          color: #111;
+          font-weight: bold;
+          font-size: 16px;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          flex-shrink: 0;
+          transition: transform 0.1s, background 0.2s;
+        }
+
+        .voice-play-btn:hover {
+          transform: scale(1.08);
+          background: #33ffe0;
+        }
+
+        .voice-info {
+          flex-grow: 1;
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+          overflow: hidden;
+        }
+
+        .voice-user {
+          font-size: 11px;
+          font-weight: bold;
+          color: #00ffcc;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .voice-time {
+          font-size: 10px;
+          color: #aaa;
+        }
+
+        .voice-delete-btn {
+          background: transparent;
+          border: none;
+          color: #ff5555;
+          font-weight: bold;
+          cursor: pointer;
+          font-size: 14px;
+          padding: 4px;
         }
 
         #toolbar {
@@ -83,6 +157,17 @@ app.get('/', (req, res) => {
         button:hover, label.btn:hover, select:hover { background: #444; }
         button.active { background: #e74c3c; border-color: #ff6b6b; }
         
+        #recordVoiceBtn.recording {
+          background: #e74c3c;
+          animation: pulse 1.2s infinite;
+        }
+
+        @keyframes pulse {
+          0% { box-shadow: 0 0 0 0 rgba(231, 76, 60, 0.7); }
+          70% { box-shadow: 0 0 0 10px rgba(231, 76, 60, 0); }
+          100% { box-shadow: 0 0 0 0 rgba(231, 76, 60, 0); }
+        }
+
         #deleteMediaBtn {
           background: #c0392b;
           border-color: #e74c3c;
@@ -113,6 +198,8 @@ app.get('/', (req, res) => {
         <button id="undoBtn">Undo</button>
         <button id="redoBtn">Redo</button>
 
+        <button id="recordVoiceBtn">🎙️ Record Voice Note</button>
+
         <div class="control-group">
           <select id="bgSelect">
             <option value="dark">Theme: Dark</option>
@@ -130,7 +217,7 @@ app.get('/', (req, res) => {
         <button id="deleteMediaBtn">Delete Selected</button>
       </div>
 
-      <div id="videoOverlayContainer"></div>
+      <div id="overlayContainer"></div>
       <canvas id="mainCanvas"></canvas>
       <canvas id="cursorCanvas"></canvas>
 
@@ -141,13 +228,14 @@ app.get('/', (req, res) => {
         const mainCtx = mainCanvas.getContext('2d');
         const cursorCanvas = document.getElementById('cursorCanvas');
         const cursorCtx = cursorCanvas.getContext('2d');
-        const videoContainer = document.getElementById('videoOverlayContainer');
+        const overlayContainer = document.getElementById('overlayContainer');
 
         const colorPicker = document.getElementById('colorPicker');
         const brushSize = document.getElementById('brushSize');
         const eraseBtn = document.getElementById('eraseBtn');
         const undoBtn = document.getElementById('undoBtn');
         const redoBtn = document.getElementById('redoBtn');
+        const recordVoiceBtn = document.getElementById('recordVoiceBtn');
         const bgSelect = document.getElementById('bgSelect');
         const imgUpload = document.getElementById('imgUpload');
         const videoUpload = document.getElementById('videoUpload');
@@ -177,6 +265,7 @@ app.get('/', (req, res) => {
         let remoteCursors = {};
         
         let mediaObjects = [];
+        let voiceNoteObjects = [];
         let selectedMedia = null;
         let dragMode = null;
         let isDragging = false;
@@ -187,6 +276,11 @@ app.get('/', (req, res) => {
         let renderScheduled = false;
         let lastNetworkSend = 0;
         let lastCursorSend = 0;
+
+        // Voice Recorder State
+        let mediaRecorder = null;
+        let audioChunks = [];
+        let isRecording = false;
 
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
         const socket = new WebSocket(\`\${protocol}//\${location.host}\`);
@@ -257,6 +351,9 @@ app.get('/', (req, res) => {
             }
           });
 
+          // Sync voice note positions to DOM
+          voiceNoteObjects.forEach(v => updateVoiceNoteDOMElement(v));
+
           for (const uid in userLayers) {
             mainCtx.drawImage(userLayers[uid].canvas, 0, 0);
           }
@@ -291,13 +388,13 @@ app.get('/', (req, res) => {
 
             const video = document.createElement('video');
             video.src = obj.src;
-            video.muted = true;         // Completely silent
-            video.autoplay = true;      // Auto-plays
-            video.loop = true;          // Continuous playback
+            video.muted = true;
+            video.autoplay = true;
+            video.loop = true;
             video.playsInline = true;
 
             wrapper.appendChild(video);
-            videoContainer.appendChild(wrapper);
+            overlayContainer.appendChild(wrapper);
             
             video.play().catch(e => console.log('Autoplay blocked:', e));
           }
@@ -308,6 +405,132 @@ app.get('/', (req, res) => {
           wrapper.style.height = obj.h + 'px';
           wrapper.style.transform = \`rotate(\${obj.angle || 0}rad)\`;
         }
+
+        function createVoiceNoteTile(vData) {
+          const tile = document.createElement('div');
+          tile.id = 'voice_tile_' + vData.id;
+          tile.className = 'voice-note-tile';
+
+          const playBtn = document.createElement('button');
+          playBtn.className = 'voice-play-btn';
+          playBtn.innerText = '▶';
+
+          const audio = new Audio(vData.audioSrc);
+
+          playBtn.onclick = () => {
+            if (audio.paused) {
+              audio.play();
+              playBtn.innerText = '⏸';
+            } else {
+              audio.pause();
+              playBtn.innerText = '▶';
+            }
+          };
+
+          audio.onended = () => {
+            playBtn.innerText = '▶';
+          };
+
+          const info = document.createElement('div');
+          info.className = 'voice-info';
+
+          const userTag = document.createElement('div');
+          userTag.className = 'voice-user';
+          userTag.innerText = vData.userName || 'User Note';
+
+          const timeTag = document.createElement('div');
+          timeTag.className = 'voice-time';
+          timeTag.innerText = vData.duration ? vData.duration + 's Voice Note' : 'Voice Memo';
+
+          info.appendChild(userTag);
+          info.appendChild(timeTag);
+
+          tile.appendChild(playBtn);
+          tile.appendChild(info);
+
+          if (vData.ownerId === myUserId) {
+            const deleteBtn = document.createElement('button');
+            deleteBtn.className = 'voice-delete-btn';
+            deleteBtn.innerText = '✖';
+            deleteBtn.onclick = () => removeVoiceNoteById(vData.id, true);
+            tile.appendChild(deleteBtn);
+          }
+
+          overlayContainer.appendChild(tile);
+          updateVoiceNoteDOMElement(vData);
+        }
+
+        function updateVoiceNoteDOMElement(vData) {
+          const tile = document.getElementById('voice_tile_' + vData.id);
+          if (tile) {
+            tile.style.left = vData.x + 'px';
+            tile.style.top = vData.y + 'px';
+          }
+        }
+
+        function removeVoiceNoteById(id, broadcast = false) {
+          const tile = document.getElementById('voice_tile_' + id);
+          if (tile) tile.remove();
+          voiceNoteObjects = voiceNoteObjects.filter(v => v.id !== id);
+
+          if (broadcast && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'delete_voice_note', id }));
+          }
+        }
+
+        // Voice Recording Logic
+        recordVoiceBtn.addEventListener('click', async () => {
+          if (!isRecording) {
+            try {
+              const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+              mediaRecorder = new MediaRecorder(stream);
+              audioChunks = [];
+
+              mediaRecorder.ondataavailable = (e) => {
+                if (e.data.size > 0) audioChunks.push(e.data);
+              };
+
+              mediaRecorder.onstop = () => {
+                const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                const reader = new FileReader();
+                reader.onloadend = () => {
+                  const base64Audio = reader.result;
+                  const newVoiceNote = {
+                    id: Math.random().toString(36).substring(2, 10),
+                    ownerId: myUserId,
+                    userName: 'User ' + myUserId.substring(0, 4),
+                    audioSrc: base64Audio,
+                    x: Math.max(50, Math.min(window.innerWidth - 250, (remoteCursors[myUserId]?.x || 100))),
+                    y: Math.max(50, Math.min(window.innerHeight - 100, (remoteCursors[myUserId]?.y || 100))),
+                    duration: Math.round(audioChunks.length * 0.5)
+                  };
+
+                  voiceNoteObjects.push(newVoiceNote);
+                  createVoiceNoteTile(newVoiceNote);
+
+                  if (socket.readyState === WebSocket.OPEN) {
+                    socket.send(JSON.stringify({ type: 'add_voice_note', note: newVoiceNote }));
+                  }
+                };
+                reader.readAsDataURL(audioBlob);
+
+                stream.getTracks().forEach(track => track.stop());
+              };
+
+              mediaRecorder.start(500);
+              isRecording = true;
+              recordVoiceBtn.innerText = "🔴 Recording... Click to Stop";
+              recordVoiceBtn.classList.add('recording');
+            } catch (err) {
+              alert("Microphone access denied or not supported.");
+            }
+          } else {
+            mediaRecorder.stop();
+            isRecording = false;
+            recordVoiceBtn.innerText = "🎙️ Record Voice Note";
+            recordVoiceBtn.classList.remove('recording');
+          }
+        });
 
         function renderCursors() {
           cursorCtx.clearRect(0, 0, cursorCanvas.width, cursorCanvas.height);
@@ -414,9 +637,7 @@ app.get('/', (req, res) => {
           }
 
           const wrapper = document.getElementById('video_wrapper_' + id);
-          if (wrapper) {
-            wrapper.remove();
-          }
+          if (wrapper) wrapper.remove();
 
           mediaObjects = mediaObjects.filter(m => m.id !== id);
           requestRender();
@@ -612,7 +833,6 @@ app.get('/', (req, res) => {
           }
         }
 
-        // Image upload handler
         imgUpload.addEventListener('change', (e) => {
           const file = e.target.files[0];
           if (file) {
@@ -641,7 +861,6 @@ app.get('/', (req, res) => {
           e.target.value = '';
         });
 
-        // Direct Video File Upload Handler
         videoUpload.addEventListener('change', (e) => {
           const file = e.target.files[0];
           if (file) {
@@ -728,6 +947,11 @@ app.get('/', (req, res) => {
             if (message.media) {
               message.media.forEach(m => addMediaToCanvas(m));
             }
+
+            if (message.voiceNotes) {
+              voiceNoteObjects = message.voiceNotes;
+              voiceNoteObjects.forEach(v => createVoiceNoteTile(v));
+            }
             
             rebuildFromHistory(message.history);
             resizeCanvases();
@@ -773,6 +997,13 @@ app.get('/', (req, res) => {
           else if (message.type === 'delete_media') {
             removeMediaById(message.id);
           }
+          else if (message.type === 'add_voice_note') {
+            voiceNoteObjects.push(message.note);
+            createVoiceNoteTile(message.note);
+          }
+          else if (message.type === 'delete_voice_note') {
+            removeVoiceNoteById(message.id, false);
+          }
           else if (message.type === 'update_history') {
             rebuildFromHistory(message.history);
           }
@@ -803,6 +1034,7 @@ wss.on('connection', (ws) => {
     userId, 
     history: drawHistory, 
     media: mediaStore,
+    voiceNotes,
     users: connectedUsers 
   }));
 
@@ -890,6 +1122,23 @@ wss.on('connection', (ws) => {
           }
         });
       }
+    }
+    else if (data.type === 'add_voice_note') {
+      data.note.ownerId = userId;
+      voiceNotes.push(data.note);
+      wss.clients.forEach((client) => {
+        if (client !== ws && client.readyState === 1) {
+          client.send(JSON.stringify(data));
+        }
+      });
+    }
+    else if (data.type === 'delete_voice_note') {
+      voiceNotes = voiceNotes.filter(v => v.id !== data.id);
+      wss.clients.forEach((client) => {
+        if (client !== ws && client.readyState === 1) {
+          client.send(JSON.stringify(data));
+        }
+      });
     }
     else if (data.type === 'undo') {
       const removed = drawHistory.filter(item => item.strokeId === data.strokeId);
